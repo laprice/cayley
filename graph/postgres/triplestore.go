@@ -23,7 +23,8 @@ import (
 )
 
 type TripleStore struct {
-	db *sqlx.DB
+	db      *sqlx.DB
+	idCache *IDLru
 }
 
 const pgSchema = `
@@ -68,28 +69,48 @@ func NewTripleStore(addr string, options graph.OptionsDict) *TripleStore {
 	}
 
 	return &TripleStore{
-		db: db,
+		db:      db,
+		idCache: NewIDLru(1 << 16),
 	}
+}
+
+func (t *TripleStore) getOrCreateNode(name string) int64 {
+	val, ok := t.idCache.RevGet(name)
+	if ok {
+		return val
+	}
+
+	r := t.db.QueryRowx("SELECT id FROM nodes WHERE name=$1::text;", name)
+	err := r.Scan(&val)
+	if err != nil { // assume it's ErrNoRows
+		r = t.db.QueryRowx("INSERT INTO nodes (name) VALUES ($1) RETURNING id;", name)
+		err = r.Scan(&val)
+		if err != nil { // concurrent write?
+			r = t.db.QueryRowx("SELECT id FROM nodes WHERE name=$1::text;", name)
+			r.Scan(&val)
+		}
+	}
+
+	t.idCache.Put(val, name)
+	return val
 }
 
 // Add a triple to the store.
 func (t *TripleStore) AddTriple(x *graph.Triple) {
-	// FIXME: this is hacky. should also steal mongo impl's LRU
-	t.db.MustExec("INSERT INTO nodes (name) SELECT $1::text WHERE NOT EXISTS (SELECT 1 FROM nodes WHERE name=$1::text);", x.Sub)
-	t.db.MustExec("INSERT INTO nodes (name) SELECT $1::text WHERE NOT EXISTS (SELECT 1 FROM nodes WHERE name=$1::text);", x.Obj)
-	t.db.MustExec("INSERT INTO nodes (name) SELECT $1::text WHERE NOT EXISTS (SELECT 1 FROM nodes WHERE name=$1::text);", x.Pred)
-	t.db.MustExec(`INSERT INTO triples (subj, pred, obj, prov) SELECT s.id, p.id, o.id, $4::text
-		FROM nodes s, nodes p, nodes o WHERE s.name=$1::text AND p.name=$2::text AND o.name=$3::text
-		AND NOT EXISTS (SELECT 1 FROM triples WHERE prov=$4::text AND subj=s.id AND pred=p.id AND obj=o.id);`,
-		x.Sub, x.Pred, x.Obj, x.Provenance)
+	sid := t.getOrCreateNode(x.Sub)
+	pid := t.getOrCreateNode(x.Pred)
+	oid := t.getOrCreateNode(x.Obj)
+	t.db.MustExec(`INSERT INTO triples (subj, pred, obj, prov) VALUES ($1,$2,$3,$4::text);`, sid, pid, oid, x.Provenance)
 }
 
 // Add a set of triples to the store, atomically if possible.
 func (t *TripleStore) AddTripleSet(xset []*graph.Triple) {
+	t.db.MustExec("BEGIN; SET CONSTRAINTS ALL DEFERRED;")
 	// TODO: multi-INSERT or COPY FROM
 	for _, x := range xset {
 		t.AddTriple(x)
 	}
+	t.db.MustExec("COMMIT;")
 }
 
 // Removes a triple matching the given one  from the database,
@@ -136,16 +157,29 @@ func (t *TripleStore) MakeFixed() *graph.FixedIterator {
 // Given a node ID, return the opaque token used by the TripleStore
 // to represent that id.
 func (t *TripleStore) GetIdFor(name string) graph.TSVal {
-	var res int64
+	res, ok := t.idCache.RevGet(name)
+	if ok {
+		return res
+	}
+
 	r := t.db.QueryRowx("SELECT id FROM nodes WHERE name=$1;", name)
 	r.Scan(&res) // ignore error
+
+	t.idCache.Put(res, name)
 	return res
 }
 
 // Given an opaque token, return the node that it represents.
 func (t *TripleStore) GetNameFor(oid graph.TSVal) (res string) {
+	val, ok := t.idCache.Get(oid.(int64))
+	if ok {
+		return val
+	}
+
 	r := t.db.QueryRowx("SELECT name FROM nodes WHERE id=$1;", oid.(int64))
 	r.Scan(&res) // ignore error
+
+	t.idCache.Put(oid.(int64), res)
 	return
 }
 
