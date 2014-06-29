@@ -18,6 +18,7 @@ import (
 	"database/sql"
 	"fmt"
 	"github.com/barakmich/glog"
+	"github.com/jmoiron/sqlx"
 	"strings"
 
 	"code.google.com/p/go-uuid/uuid"
@@ -26,6 +27,7 @@ import (
 
 type Iterator struct {
 	graph.BaseIterator
+	tx         *sqlx.Tx
 	ts         *TripleStore
 	dir        string
 	val        graph.TSVal
@@ -65,11 +67,12 @@ func NewIterator(ts *TripleStore, collection string, dir string, val graph.TSVal
 		m.sqlQuery = "FROM nodes t WHERE name=$1::text"
 	}
 
+	m.tx, _ = ts.db.Beginx()
 	m.cursorName = "j" + strings.Replace(uuid.NewRandom().String(), "-", "", -1)
-	r := ts.db.QueryRowx("SELECT COUNT(t.id) "+m.sqlQuery+";", m.name)
+	r := m.tx.QueryRowx("SELECT COUNT(t.id) "+m.sqlQuery+";", m.name)
 	r.Scan(&m.size)
 
-	ts.db.MustExec("DECLARE "+m.cursorName+" CURSOR FOR SELECT t.id "+m.sqlQuery+";", m.name)
+	m.tx.MustExec("DECLARE "+m.cursorName+" CURSOR FOR SELECT t.id "+m.sqlQuery+";", m.name)
 	m.ts = ts
 	m.isAll = false
 	return &m
@@ -82,27 +85,32 @@ func NewAllIterator(ts *TripleStore, collection string) *Iterator {
 	m.collection = collection
 	m.sqlQuery = "SELECT id FROM " + collection + ";"
 
-	r := ts.db.QueryRowx("SELECT COUNT(*) FROM " + collection + ";")
+	m.tx, _ = ts.db.Beginx()
+	r := m.tx.QueryRowx("SELECT COUNT(*) FROM " + collection + ";")
 	r.Scan(&m.size)
 
 	m.cursorName = "j" + strings.Replace(uuid.NewRandom().String(), "-", "", -1)
-	ts.db.MustExec("DECLARE " + m.cursorName + " CURSOR FOR " + m.sqlQuery + ";")
+	m.tx.MustExec("DECLARE " + m.cursorName + " CURSOR FOR " + m.sqlQuery + ";")
 	m.ts = ts
 	m.isAll = true
 	return &m
 }
 
 func (it *Iterator) Reset() {
-	it.ts.db.MustExec("CLOSE " + it.cursorName + ";")
+	it.tx.MustExec("CLOSE " + it.cursorName + ";")
+	it.tx.Commit()
+	it.tx, _ = it.ts.db.Beginx()
+
 	if it.isAll {
-		it.ts.db.MustExec("DECLARE " + it.cursorName + " CURSOR FOR " + it.sqlQuery + ";")
+		it.tx.MustExec("DECLARE " + it.cursorName + " CURSOR FOR " + it.sqlQuery + ";")
 	} else {
-		it.ts.db.MustExec("DECLARE "+it.cursorName+" CURSOR FOR "+it.sqlQuery+";", it.name)
+		it.tx.MustExec("DECLARE "+it.cursorName+" CURSOR FOR "+it.sqlQuery+";", it.name)
 	}
 }
 
 func (it *Iterator) Close() {
-	it.ts.db.MustExec("CLOSE " + it.cursorName + ";")
+	it.tx.MustExec("CLOSE " + it.cursorName + ";")
+	it.tx.Commit()
 }
 
 func (it *Iterator) Clone() graph.Iterator {
@@ -118,7 +126,7 @@ func (it *Iterator) Clone() graph.Iterator {
 
 func (it *Iterator) Next() (graph.TSVal, bool) {
 	var tid int64
-	r := it.ts.db.QueryRowx("FETCH NEXT FROM " + it.cursorName + ";")
+	r := it.tx.QueryRowx("FETCH NEXT FROM " + it.cursorName + ";")
 	if err := r.Scan(&tid); err != nil {
 		if err != sql.ErrNoRows {
 			glog.Errorln("Error Nexting Iterator: ", err)
@@ -136,7 +144,7 @@ func (it *Iterator) Check(v graph.TSVal) bool {
 	}
 
 	hit := 0
-	r := it.ts.db.QueryRowx("SELECT COUNT(t.id) "+it.sqlQuery+" AND t.id=$2;", it.name, v.(int64))
+	r := it.tx.QueryRowx("SELECT COUNT(t.id) "+it.sqlQuery+" AND t.id=$2;", it.name, v.(int64))
 	r.Scan(&hit)
 	return hit > 0
 }

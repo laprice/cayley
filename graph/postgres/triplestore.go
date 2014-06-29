@@ -66,7 +66,6 @@ func NewTripleStore(addr string, options graph.OptionsDict) *TripleStore {
 	if err != nil {
 		glog.Fatalln(err.Error())
 	}
-	db.MustExec("BEGIN;")
 
 	return &TripleStore{
 		db: db,
@@ -160,7 +159,6 @@ func (t *TripleStore) Size() (res int64) {
 // Close the triple store and clean up. (Flush to disk, cleanly
 // sever connections, etc)
 func (t *TripleStore) Close() {
-	t.db.MustExec("COMMIT;")
 	t.db.Close()
 }
 
