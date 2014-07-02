@@ -110,7 +110,7 @@ func (it *NodeIterator) Next() (graph.TSVal, bool) {
 		return graph.NextLogOut(it, nil, false)
 	}
 	it.Last = NodeTSVal(tid)
-	return graph.NextLogOut(it, NodeTSVal(tid), false)
+	return graph.NextLogOut(it, NodeTSVal(tid), true)
 }
 
 func (it *NodeIterator) Check(v graph.TSVal) bool {
