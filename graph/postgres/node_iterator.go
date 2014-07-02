@@ -23,10 +23,11 @@ import (
 
 	"code.google.com/p/go-uuid/uuid"
 	"github.com/google/cayley/graph"
+	"github.com/google/cayley/graph/iterator"
 )
 
 type NodeIterator struct {
-	graph.BaseIterator
+	iterator.Base
 	tx   *sqlx.Tx
 	ts   *TripleStore
 	size int64
@@ -37,7 +38,7 @@ type NodeIterator struct {
 
 func NewNodeIterator(ts *TripleStore) *NodeIterator {
 	var m NodeIterator
-	graph.BaseIteratorInit(&m.BaseIterator)
+	iterator.BaseInit(&m.Base)
 
 	m.sqlQuery = "SELECT id FROM nodes"
 
@@ -79,7 +80,7 @@ func (it *NodeIterator) Close() {
 
 func (it *NodeIterator) Clone() graph.Iterator {
 	newM := &NodeIterator{}
-	graph.BaseIteratorInit(&newM.BaseIterator)
+	iterator.BaseInit(&newM.Base)
 	newM.ts = it.ts
 	newM.size = it.size
 	newM.sqlQuery = it.sqlQuery

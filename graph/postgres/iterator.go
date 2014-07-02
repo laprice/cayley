@@ -23,13 +23,14 @@ import (
 
 	"code.google.com/p/go-uuid/uuid"
 	"github.com/google/cayley/graph"
+	"github.com/google/cayley/graph/iterator"
 )
 
 type TripleIterator struct {
-	graph.BaseIterator
+	iterator.Base
 	tx     *sqlx.Tx
 	ts     *TripleStore
-	dir    string
+	dir    graph.Direction
 	val    NodeTSVal
 	size   int64
 	isAll  bool
@@ -39,9 +40,9 @@ type TripleIterator struct {
 	cursorName string
 }
 
-func NewTripleIterator(ts *TripleStore, dir string, val graph.TSVal) *TripleIterator {
+func NewTripleIterator(ts *TripleStore, dir graph.Direction, val graph.TSVal) *TripleIterator {
 	var m TripleIterator
-	graph.BaseIteratorInit(&m.BaseIterator)
+	iterator.BaseInit(&m.Base)
 
 	m.cursorName = "j" + strings.Replace(uuid.NewRandom().String(), "-", "", -1)
 	m.sqlQuery = "SELECT id, subj, pred, obj, prov FROM triples"
@@ -52,19 +53,19 @@ func NewTripleIterator(ts *TripleStore, dir string, val graph.TSVal) *TripleIter
 		return nil
 	}
 
-	if dir != "" {
+	if dir != graph.Any {
 		m.dir = dir
 		m.val = val.(NodeTSVal)
 		where := ""
 		switch dir {
 
-		case "s":
+		case graph.Subject:
 			where = " WHERE subj=$1"
-		case "p":
+		case graph.Predicate:
 			where = " WHERE pred=$1"
-		case "o":
+		case graph.Object:
 			where = " WHERE obj=$1"
-		case "c":
+		case graph.Provenance:
 			where = " WHERE prov=$1"
 		}
 		r := m.tx.QueryRowx("SELECT COUNT(*) FROM triples"+where, m.val)
@@ -91,7 +92,7 @@ func NewTripleIterator(ts *TripleStore, dir string, val graph.TSVal) *TripleIter
 }
 
 func NewAllIterator(ts *TripleStore) *TripleIterator {
-	return NewTripleIterator(ts, "", nil)
+	return NewTripleIterator(ts, graph.Any, nil)
 }
 
 func (it *TripleIterator) Reset() {
@@ -103,7 +104,7 @@ func (it *TripleIterator) Reset() {
 		glog.Fatalln(err.Error())
 	}
 
-	if it.dir == "" {
+	if it.dir == graph.Any {
 		it.tx.MustExec("DECLARE " + it.cursorName + " CURSOR FOR " + it.sqlQuery + ";")
 	} else {
 		it.tx.MustExec("DECLARE "+it.cursorName+" CURSOR FOR "+it.sqlQuery+";", it.val)
@@ -117,7 +118,7 @@ func (it *TripleIterator) Close() {
 
 func (it *TripleIterator) Clone() graph.Iterator {
 	newM := &TripleIterator{}
-	graph.BaseIteratorInit(&newM.BaseIterator)
+	iterator.BaseInit(&newM.Base)
 	newM.dir = it.dir
 	newM.val = it.val
 	newM.ts = it.ts
@@ -131,7 +132,7 @@ func (it *TripleIterator) Clone() graph.Iterator {
 		glog.Fatalln(err.Error())
 		return nil
 	}
-	if newM.dir == "" {
+	if newM.dir == graph.Any {
 		newM.tx.MustExec("DECLARE " + newM.cursorName + " CURSOR FOR " + newM.sqlQuery + ";")
 	} else {
 		newM.tx.MustExec("DECLARE "+newM.cursorName+" CURSOR FOR "+newM.sqlQuery+";", newM.val)
@@ -164,7 +165,7 @@ func (it *TripleIterator) Next() (graph.TSVal, bool) {
 
 func (it *TripleIterator) Check(v graph.TSVal) bool {
 	graph.CheckLogIn(it, v)
-	if it.dir == "" {
+	if it.dir == graph.Any {
 		it.Last = v
 		return graph.CheckLogOut(it, v, true)
 	}
@@ -197,7 +198,7 @@ func (it *TripleIterator) Sorted() bool                     { return false }
 func (it *TripleIterator) Optimize() (graph.Iterator, bool) { return it, false }
 
 func (it *TripleIterator) DebugString(indent int) string {
-	if it.dir == "" {
+	if it.dir == graph.Any {
 		return fmt.Sprintf("%s(%s size:%d ALL)", strings.Repeat(" ", indent), it.Type(), it.size)
 	}
 	return fmt.Sprintf("%s(%s size:%d %s %s)", strings.Repeat(" ", indent), it.Type(), it.size, it.val, it.ts.GetNameFor(it.val))

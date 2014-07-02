@@ -17,6 +17,7 @@ package postgres
 import (
 	"database/sql"
 	"github.com/google/cayley/graph"
+	"github.com/google/cayley/graph/iterator"
 	"github.com/jmoiron/sqlx"
 	_ "github.com/lib/pq"
 
@@ -104,9 +105,9 @@ func (t *TripleStore) getOrCreateNode(name string) int64 {
 
 // Add a triple to the store.
 func (t *TripleStore) AddTriple(x *graph.Triple) {
-	sid := t.getOrCreateNode(x.Sub)
-	pid := t.getOrCreateNode(x.Pred)
-	oid := t.getOrCreateNode(x.Obj)
+	sid := t.getOrCreateNode(x.Subject)
+	pid := t.getOrCreateNode(x.Predicate)
+	oid := t.getOrCreateNode(x.Object)
 	if x.Provenance != "" {
 		cid := t.getOrCreateNode(x.Provenance)
 		t.db.MustExec(`INSERT INTO triples (subj, pred, obj, prov) VALUES ($1,$2,$3,$4);`, sid, pid, oid, cid)
@@ -132,12 +133,12 @@ func (t *TripleStore) RemoveTriple(x *graph.Triple) {
 		t.db.MustExec(`DELETE FROM triples USING nodes s, nodes p, nodes o, nodes c
 		WHERE s.name=$1::text AND p.name=$2::text AND o.name=$3::text AND c.name=$4::text
 		AND subj=s.id AND obj=o.id AND pred=p.id AND prov=c.id;`,
-			x.Sub, x.Pred, x.Obj, x.Provenance)
+			x.Subject, x.Predicate, x.Object, x.Provenance)
 	} else {
 		t.db.MustExec(`DELETE FROM triples USING nodes s, nodes p, nodes o
 		WHERE s.name=$1::text AND p.name=$2::text AND o.name=$3::text
 		AND subj=s.id AND obj=o.id AND pred=p.id AND prov IS NULL;`,
-			x.Sub, x.Pred, x.Obj)
+			x.Subject, x.Predicate, x.Object)
 	}
 }
 
@@ -148,11 +149,11 @@ func (t *TripleStore) GetTriple(tid graph.TSVal) (tr *graph.Triple) {
 	tr = &graph.Triple{}
 	trv := tid.(TripleTSVal)
 
-	tr.Sub, ok = t.idCache.Get(trv[1])
+	tr.Subject, ok = t.idCache.Get(trv[1])
 	gotAll = gotAll && ok
-	tr.Pred, ok = t.idCache.Get(trv[2])
+	tr.Predicate, ok = t.idCache.Get(trv[2])
 	gotAll = gotAll && ok
-	tr.Obj, ok = t.idCache.Get(trv[3])
+	tr.Object, ok = t.idCache.Get(trv[3])
 	gotAll = gotAll && ok
 	if trv[4] != -1 {
 		tr.Provenance, ok = t.idCache.Get(trv[4])
@@ -161,13 +162,13 @@ func (t *TripleStore) GetTriple(tid graph.TSVal) (tr *graph.Triple) {
 			r := t.db.QueryRowx(`SELECT s.name, p.name, o.name, c.name
 				FROM triples t, nodes s, nodes p, nodes o, nodes c
 				WHERE t.id=$1 AND t.subj=s.id AND t.pred=p.id AND t.obj=o.id AND t.prov=c.id;`, trv[0])
-			err := r.Scan(&tr.Sub, &tr.Pred, &tr.Obj, &tr.Provenance)
+			err := r.Scan(&tr.Subject, &tr.Predicate, &tr.Object, &tr.Provenance)
 			if err != nil {
 				glog.Fatalln(err.Error())
 			}
-			t.idCache.Put(trv[1], tr.Sub)
-			t.idCache.Put(trv[2], tr.Pred)
-			t.idCache.Put(trv[3], tr.Obj)
+			t.idCache.Put(trv[1], tr.Subject)
+			t.idCache.Put(trv[2], tr.Predicate)
+			t.idCache.Put(trv[3], tr.Object)
 			t.idCache.Put(trv[4], tr.Provenance)
 		}
 	} else {
@@ -176,13 +177,13 @@ func (t *TripleStore) GetTriple(tid graph.TSVal) (tr *graph.Triple) {
 			r := t.db.QueryRowx(`SELECT s.name, p.name, o.name
 				FROM triples t, nodes s, nodes p, nodes o
 				WHERE t.id=$1 AND t.subj=s.id AND t.pred=p.id AND t.obj=o.id;`, trv[0])
-			err := r.Scan(&tr.Sub, &tr.Pred, &tr.Obj)
+			err := r.Scan(&tr.Subject, &tr.Predicate, &tr.Object)
 			if err != nil {
 				glog.Fatalln(err.Error())
 			}
-			t.idCache.Put(trv[1], tr.Sub)
-			t.idCache.Put(trv[2], tr.Pred)
-			t.idCache.Put(trv[3], tr.Obj)
+			t.idCache.Put(trv[1], tr.Subject)
+			t.idCache.Put(trv[2], tr.Predicate)
+			t.idCache.Put(trv[3], tr.Object)
 		}
 	}
 
@@ -191,7 +192,7 @@ func (t *TripleStore) GetTriple(tid graph.TSVal) (tr *graph.Triple) {
 
 // Given a direction and a token, creates an iterator of links which have
 // that node token in that directional field.
-func (ts *TripleStore) GetTripleIterator(dir string, val graph.TSVal) graph.Iterator {
+func (ts *TripleStore) GetTripleIterator(dir graph.Direction, val graph.TSVal) graph.Iterator {
 	return NewTripleIterator(ts, dir, val)
 }
 
@@ -205,8 +206,8 @@ func (ts *TripleStore) GetTriplesAllIterator() graph.Iterator {
 	return NewAllIterator(ts)
 }
 
-func (t *TripleStore) MakeFixed() *graph.FixedIterator {
-	return graph.NewFixedIteratorWithCompare(func(a, b graph.TSVal) bool {
+func (t *TripleStore) FixedIterator() graph.FixedIterator {
+	return iterator.NewFixedIteratorWithCompare(func(a, b graph.TSVal) bool {
 		switch v := a.(type) {
 		case NodeTSVal:
 			return v == b.(NodeTSVal)
@@ -289,16 +290,16 @@ func (t *TripleStore) Close() {
 //
 // Iterators will call this. At worst, a valid implementation is
 // self.GetIdFor(self.GetTriple(triple_id).Get(dir))
-func (t *TripleStore) GetTripleDirection(triple_id graph.TSVal, dir string) graph.TSVal {
+func (t *TripleStore) GetTripleDirection(triple_id graph.TSVal, dir graph.Direction) graph.TSVal {
 	trv := triple_id.(TripleTSVal)
 	switch dir {
-	case "s":
+	case graph.Subject:
 		return trv[1]
-	case "p":
+	case graph.Predicate:
 		return trv[2]
-	case "o":
+	case graph.Object:
 		return trv[3]
-	case "c":
+	case graph.Provenance:
 		return trv[4]
 	}
 	return trv[0]
@@ -307,18 +308,18 @@ func (t *TripleStore) GetTripleDirection(triple_id graph.TSVal, dir string) grap
 func (ts *TripleStore) OptimizeIterator(it graph.Iterator) (graph.Iterator, bool) {
 	switch it.Type() {
 	case "linksto":
-		return ts.optimizeLinksTo(it.(*graph.LinksToIterator))
+		return ts.optimizeLinksTo(it.(*iterator.LinksTo))
 
 	}
 	return it, false
 }
 
-func (ts *TripleStore) optimizeLinksTo(it *graph.LinksToIterator) (graph.Iterator, bool) {
+func (ts *TripleStore) optimizeLinksTo(it *iterator.LinksTo) (graph.Iterator, bool) {
 	l := it.GetSubIterators()
-	if l.Len() != 1 {
+	if len(l) != 1 {
 		return it, false
 	}
-	primaryIt := l.Front().Value.(graph.Iterator)
+	primaryIt := l[0]
 	if primaryIt.Type() == "fixed" {
 		size, _ := primaryIt.Size()
 		if size == 1 {
