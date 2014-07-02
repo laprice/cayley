@@ -25,149 +25,185 @@ import (
 	"github.com/google/cayley/graph"
 )
 
-type Iterator struct {
+type TripleIterator struct {
 	graph.BaseIterator
-	tx         *sqlx.Tx
-	ts         *TripleStore
-	dir        string
-	val        graph.TSVal
-	name       string
-	size       int64
-	isAll      bool
-	collection string
+	tx     *sqlx.Tx
+	ts     *TripleStore
+	dir    string
+	val    NodeTSVal
+	size   int64
+	isAll  bool
+	isNode bool
 
 	sqlQuery   string
 	cursorName string
 }
 
-func NewIterator(ts *TripleStore, collection string, dir string, val graph.TSVal) *Iterator {
-	var m Iterator
+func NewTripleIterator(ts *TripleStore, dir string, val graph.TSVal) *TripleIterator {
+	var m TripleIterator
 	graph.BaseIteratorInit(&m.BaseIterator)
 
-	m.val = val
-	m.name = ts.GetNameFor(val)
-	m.collection = collection
-	m.dir = dir
+	m.cursorName = "j" + strings.Replace(uuid.NewRandom().String(), "-", "", -1)
+	m.sqlQuery = "SELECT id, subj, pred, obj, prov FROM triples"
+	var err error
+	m.tx, err = ts.db.Beginx()
+	if err != nil {
+		glog.Fatalln(err.Error())
+		return nil
+	}
 
-	if collection == "triples" {
-		m.sqlQuery = `FROM triples t`
+	if dir != "" {
+		m.dir = dir
+		m.val = val.(NodeTSVal)
+		where := ""
 		switch dir {
 
 		case "s":
-			m.sqlQuery += ", nodes n WHERE t.subj=n.id AND n.name=$1::text"
+			where = " WHERE subj=$1"
 		case "p":
-			m.sqlQuery += ", nodes n WHERE t.pred=n.id AND n.name=$1::text"
+			where = " WHERE pred=$1"
 		case "o":
-			m.sqlQuery += ", nodes n WHERE t.obj=n.id AND n.name=$1::text"
+			where = " WHERE obj=$1"
 		case "c":
-			m.sqlQuery += " WHERE t.prov=$1::text"
+			where = " WHERE prov=$1"
 		}
+		r := m.tx.QueryRowx("SELECT COUNT(*) FROM triples"+where, m.val)
+		err = r.Scan(&m.size)
+		if err != nil {
+			glog.Fatalln(err.Error())
+			return nil
+		}
+		m.sqlQuery += where
+		m.tx.MustExec("DECLARE "+m.cursorName+" CURSOR FOR "+m.sqlQuery+";", m.val)
+
 	} else {
-		// nodes -- does this ever get called?
-		m.sqlQuery = "FROM nodes t WHERE name=$1::text"
+		r := m.tx.QueryRowx("SELECT COUNT(*) FROM triples;")
+		err = r.Scan(&m.size)
+		if err != nil {
+			glog.Fatalln(err.Error())
+			return nil
+		}
+		m.tx.MustExec("DECLARE " + m.cursorName + " CURSOR FOR " + m.sqlQuery + ";")
 	}
 
-	m.tx, _ = ts.db.Beginx()
-	m.cursorName = "j" + strings.Replace(uuid.NewRandom().String(), "-", "", -1)
-	r := m.tx.QueryRowx("SELECT COUNT(t.id) "+m.sqlQuery+";", m.name)
-	r.Scan(&m.size)
-
-	m.tx.MustExec("DECLARE "+m.cursorName+" CURSOR FOR SELECT t.id "+m.sqlQuery+";", m.name)
 	m.ts = ts
-	m.isAll = false
 	return &m
 }
 
-func NewAllIterator(ts *TripleStore, collection string) *Iterator {
-	var m Iterator
-	graph.BaseIteratorInit(&m.BaseIterator)
-
-	m.collection = collection
-	m.sqlQuery = "SELECT id FROM " + collection + ";"
-
-	m.tx, _ = ts.db.Beginx()
-	r := m.tx.QueryRowx("SELECT COUNT(*) FROM " + collection + ";")
-	r.Scan(&m.size)
-
-	m.cursorName = "j" + strings.Replace(uuid.NewRandom().String(), "-", "", -1)
-	m.tx.MustExec("DECLARE " + m.cursorName + " CURSOR FOR " + m.sqlQuery + ";")
-	m.ts = ts
-	m.isAll = true
-	return &m
+func NewAllIterator(ts *TripleStore) *TripleIterator {
+	return NewTripleIterator(ts, "", nil)
 }
 
-func (it *Iterator) Reset() {
+func (it *TripleIterator) Reset() {
+	var err error
 	it.tx.MustExec("CLOSE " + it.cursorName + ";")
 	it.tx.Commit()
-	it.tx, _ = it.ts.db.Beginx()
+	it.tx, err = it.ts.db.Beginx()
+	if err != nil {
+		glog.Fatalln(err.Error())
+	}
 
-	if it.isAll {
+	if it.dir == "" {
 		it.tx.MustExec("DECLARE " + it.cursorName + " CURSOR FOR " + it.sqlQuery + ";")
 	} else {
-		it.tx.MustExec("DECLARE "+it.cursorName+" CURSOR FOR "+it.sqlQuery+";", it.name)
+		it.tx.MustExec("DECLARE "+it.cursorName+" CURSOR FOR "+it.sqlQuery+";", it.val)
 	}
 }
 
-func (it *Iterator) Close() {
+func (it *TripleIterator) Close() {
 	it.tx.MustExec("CLOSE " + it.cursorName + ";")
 	it.tx.Commit()
 }
 
-func (it *Iterator) Clone() graph.Iterator {
-	var newM *Iterator
-	if it.isAll {
-		newM = NewAllIterator(it.ts, it.collection)
+func (it *TripleIterator) Clone() graph.Iterator {
+	newM := &TripleIterator{}
+	graph.BaseIteratorInit(&newM.BaseIterator)
+	newM.dir = it.dir
+	newM.val = it.val
+	newM.ts = it.ts
+	newM.size = it.size
+	newM.sqlQuery = it.sqlQuery
+
+	var err error
+	newM.cursorName = "j" + strings.Replace(uuid.NewRandom().String(), "-", "", -1)
+	newM.tx, err = newM.ts.db.Beginx()
+	if err != nil {
+		glog.Fatalln(err.Error())
+		return nil
+	}
+	if newM.dir == "" {
+		newM.tx.MustExec("DECLARE " + newM.cursorName + " CURSOR FOR " + newM.sqlQuery + ";")
 	} else {
-		newM = NewIterator(it.ts, it.collection, it.dir, it.val)
+		newM.tx.MustExec("DECLARE "+newM.cursorName+" CURSOR FOR "+newM.sqlQuery+";", newM.val)
 	}
 	newM.CopyTagsFrom(it)
 	return newM
 }
 
-func (it *Iterator) Next() (graph.TSVal, bool) {
-	var tid int64
+func (it *TripleIterator) Next() (graph.TSVal, bool) {
+	graph.NextLogIn(it)
+
+	var nullProv sql.NullInt64
+	var trv TripleTSVal
 	r := it.tx.QueryRowx("FETCH NEXT FROM " + it.cursorName + ";")
-	if err := r.Scan(&tid); err != nil {
+	if err := r.Scan(&trv[0], &trv[1], &trv[2], &trv[3], &nullProv); err != nil {
 		if err != sql.ErrNoRows {
 			glog.Errorln("Error Nexting Iterator: ", err)
 		}
-		return nil, false
+		return graph.NextLogOut(it, nil, false)
 	}
-
-	it.Last = tid
-	return tid, true
+	if nullProv.Valid {
+		nv, _ := nullProv.Value()
+		trv[4] = nv.(int64)
+	} else {
+		trv[4] = int64(-1)
+	}
+	it.Last = trv
+	return graph.NextLogOut(it, trv, true)
 }
 
-func (it *Iterator) Check(v graph.TSVal) bool {
-	if it.isAll {
-		return true
+func (it *TripleIterator) Check(v graph.TSVal) bool {
+	graph.CheckLogIn(it, v)
+	if it.dir == "" {
+		it.Last = v
+		return graph.CheckLogOut(it, v, true)
 	}
 
+	trv := v.(TripleTSVal)
 	hit := 0
-	r := it.tx.QueryRowx("SELECT COUNT(t.id) "+it.sqlQuery+" AND t.id=$2;", it.name, v.(int64))
-	r.Scan(&hit)
-	return hit > 0
+	r := it.tx.QueryRowx("SELECT COUNT(*) FROM ("+it.sqlQuery+") x WHERE x.id=$2;", it.val, trv[0])
+	err := r.Scan(&hit)
+	if err != nil {
+		glog.Fatalln(err.Error())
+	}
+	if hit > 0 {
+		it.Last = v
+		return graph.CheckLogOut(it, v, true)
+	}
+	return graph.CheckLogOut(it, v, false)
 }
 
-func (it *Iterator) Size() (int64, bool) {
+func (it *TripleIterator) Size() (int64, bool) {
 	return it.size, true
 }
 
-func (it *Iterator) Type() string {
+func (it *TripleIterator) Type() string {
 	if it.isAll {
 		return "all"
 	}
 	return "postgres"
 }
-func (it *Iterator) Sorted() bool                     { return false }
-func (it *Iterator) Optimize() (graph.Iterator, bool) { return it, false }
+func (it *TripleIterator) Sorted() bool                     { return false }
+func (it *TripleIterator) Optimize() (graph.Iterator, bool) { return it, false }
 
-func (it *Iterator) DebugString(indent int) string {
-	size, _ := it.Size()
-	return fmt.Sprintf("%s(%s size:%d %s %s)", strings.Repeat(" ", indent), it.Type(), size, it.val, it.name)
+func (it *TripleIterator) DebugString(indent int) string {
+	if it.dir == "" {
+		return fmt.Sprintf("%s(%s size:%d ALL)", strings.Repeat(" ", indent), it.Type(), it.size)
+	}
+	return fmt.Sprintf("%s(%s size:%d %s %s)", strings.Repeat(" ", indent), it.Type(), it.size, it.val, it.ts.GetNameFor(it.val))
 }
 
-func (it *Iterator) GetStats() *graph.IteratorStats {
+func (it *TripleIterator) GetStats() *graph.IteratorStats {
 	size, _ := it.Size()
 	return &graph.IteratorStats{
 		CheckCost: 10,

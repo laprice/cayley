@@ -15,6 +15,7 @@
 package postgres
 
 import (
+	"database/sql"
 	"github.com/google/cayley/graph"
 	"github.com/jmoiron/sqlx"
 	_ "github.com/lib/pq"
@@ -26,6 +27,9 @@ type TripleStore struct {
 	db      *sqlx.DB
 	idCache *IDLru
 }
+
+type TripleTSVal [5]int64
+type NodeTSVal int64
 
 const pgSchema = `
 
@@ -39,14 +43,14 @@ CREATE TABLE triples (
 	subj bigint references nodes(id),
 	obj  bigint references nodes(id),
 	pred bigint references nodes(id),
-	prov varchar
+	prov bigint null references nodes(id)
 );
 
 CREATE INDEX node_name_idx ON nodes(name);
-CREATE INDEX triple_search_idx ON triples(prov, subj, pred, obj);
+CREATE INDEX triple_search_idx ON triples(subj, obj, pred, prov);
 CREATE INDEX triple_subj_idx ON triples(subj);
 CREATE INDEX triple_pred_idx ON triples(pred);
-CREATE INDEX triple_sobj_idx ON triples(obj);
+CREATE INDEX triple_obj_idx ON triples(obj);
 CREATE INDEX triple_prov_idx ON triples(prov);
 `
 
@@ -82,12 +86,15 @@ func (t *TripleStore) getOrCreateNode(name string) int64 {
 
 	r := t.db.QueryRowx("SELECT id FROM nodes WHERE name=$1::text;", name)
 	err := r.Scan(&val)
-	if err != nil { // assume it's ErrNoRows
-		r = t.db.QueryRowx("INSERT INTO nodes (name) VALUES ($1) RETURNING id;", name)
-		err = r.Scan(&val)
-		if err != nil { // concurrent write?
-			r = t.db.QueryRowx("SELECT id FROM nodes WHERE name=$1::text;", name)
-			r.Scan(&val)
+	if err != nil {
+		if err != sql.ErrNoRows {
+			glog.Fatalln(err.Error())
+		} else {
+			r = t.db.QueryRowx("INSERT INTO nodes (name) VALUES ($1) RETURNING id;", name)
+			err = r.Scan(&val)
+			if err != nil {
+				glog.Fatalln(err.Error())
+			}
 		}
 	}
 
@@ -100,7 +107,12 @@ func (t *TripleStore) AddTriple(x *graph.Triple) {
 	sid := t.getOrCreateNode(x.Sub)
 	pid := t.getOrCreateNode(x.Pred)
 	oid := t.getOrCreateNode(x.Obj)
-	t.db.MustExec(`INSERT INTO triples (subj, pred, obj, prov) VALUES ($1,$2,$3,$4::text);`, sid, pid, oid, x.Provenance)
+	if x.Provenance != "" {
+		cid := t.getOrCreateNode(x.Provenance)
+		t.db.MustExec(`INSERT INTO triples (subj, pred, obj, prov) VALUES ($1,$2,$3,$4);`, sid, pid, oid, cid)
+	} else {
+		t.db.MustExec(`INSERT INTO triples (subj, pred, obj, prov) VALUES ($1,$2,$3,NULL);`, sid, pid, oid)
+	}
 }
 
 // Add a set of triples to the store, atomically if possible.
@@ -116,41 +128,94 @@ func (t *TripleStore) AddTripleSet(xset []*graph.Triple) {
 // Removes a triple matching the given one  from the database,
 // if it exists. Does nothing otherwise.
 func (t *TripleStore) RemoveTriple(x *graph.Triple) {
-	t.db.MustExec(`DELETE FROM triples USING nodes s, nodes p, nodes o
-		WHERE prov=$4::text AND s.name=$1::text AND p.name=$2::text AND o.name=$3::text
-		AND subj=s.id AND pred=p.id AND obj=o.id;`,
-		x.Sub, x.Pred, x.Obj, x.Provenance)
+	if x.Provenance != "" {
+		t.db.MustExec(`DELETE FROM triples USING nodes s, nodes p, nodes o, nodes c
+		WHERE s.name=$1::text AND p.name=$2::text AND o.name=$3::text AND c.name=$4::text
+		AND subj=s.id AND obj=o.id AND pred=p.id AND prov=c.id;`,
+			x.Sub, x.Pred, x.Obj, x.Provenance)
+	} else {
+		t.db.MustExec(`DELETE FROM triples USING nodes s, nodes p, nodes o
+		WHERE s.name=$1::text AND p.name=$2::text AND o.name=$3::text
+		AND subj=s.id AND obj=o.id AND pred=p.id AND prov IS NULL;`,
+			x.Sub, x.Pred, x.Obj)
+	}
 }
 
 // Given an opaque token, returns the triple for that token from the store.
 func (t *TripleStore) GetTriple(tid graph.TSVal) (tr *graph.Triple) {
-	r := t.db.QueryRowx(`SELECT s.name, p.name, o.name, t.prov 
-		FROM triples t, nodes s, nodes p, nodes o
-		WHERE t.id=$1 AND t.subj=s.id AND t.pred=p.id AND t.obj=o.id;`, tid.(int64))
+	ok := false
+	gotAll := true
 	tr = &graph.Triple{}
-	r.Scan(&tr.Sub, &tr.Pred, &tr.Obj, &tr.Provenance) // ignore error
+	trv := tid.(TripleTSVal)
+
+	tr.Sub, ok = t.idCache.Get(trv[1])
+	gotAll = gotAll && ok
+	tr.Pred, ok = t.idCache.Get(trv[2])
+	gotAll = gotAll && ok
+	tr.Obj, ok = t.idCache.Get(trv[3])
+	gotAll = gotAll && ok
+	if trv[4] != -1 {
+		tr.Provenance, ok = t.idCache.Get(trv[4])
+		gotAll = gotAll && ok
+		if !gotAll {
+			r := t.db.QueryRowx(`SELECT s.name, p.name, o.name, c.name
+				FROM triples t, nodes s, nodes p, nodes o, nodes c
+				WHERE t.id=$1 AND t.subj=s.id AND t.pred=p.id AND t.obj=o.id AND t.prov=c.id;`, trv[0])
+			err := r.Scan(&tr.Sub, &tr.Pred, &tr.Obj, &tr.Provenance)
+			if err != nil {
+				glog.Fatalln(err.Error())
+			}
+			t.idCache.Put(trv[1], tr.Sub)
+			t.idCache.Put(trv[2], tr.Pred)
+			t.idCache.Put(trv[3], tr.Obj)
+			t.idCache.Put(trv[4], tr.Provenance)
+		}
+	} else {
+		tr.Provenance = ""
+		if !gotAll {
+			r := t.db.QueryRowx(`SELECT s.name, p.name, o.name
+				FROM triples t, nodes s, nodes p, nodes o
+				WHERE t.id=$1 AND t.subj=s.id AND t.pred=p.id AND t.obj=o.id;`, trv[0])
+			err := r.Scan(&tr.Sub, &tr.Pred, &tr.Obj)
+			if err != nil {
+				glog.Fatalln(err.Error())
+			}
+			t.idCache.Put(trv[1], tr.Sub)
+			t.idCache.Put(trv[2], tr.Pred)
+			t.idCache.Put(trv[3], tr.Obj)
+		}
+	}
+
 	return
 }
 
 // Given a direction and a token, creates an iterator of links which have
 // that node token in that directional field.
 func (ts *TripleStore) GetTripleIterator(dir string, val graph.TSVal) graph.Iterator {
-	return NewIterator(ts, "triples", dir, val)
+	return NewTripleIterator(ts, dir, val)
 }
 
 // Returns an iterator enumerating all nodes in the graph.
 func (ts *TripleStore) GetNodesAllIterator() graph.Iterator {
-	return NewAllIterator(ts, "nodes")
+	return NewNodeIterator(ts)
 }
 
 // Returns an iterator enumerating all links in the graph.
 func (ts *TripleStore) GetTriplesAllIterator() graph.Iterator {
-	return NewAllIterator(ts, "triples")
+	return NewAllIterator(ts)
 }
 
 func (t *TripleStore) MakeFixed() *graph.FixedIterator {
 	return graph.NewFixedIteratorWithCompare(func(a, b graph.TSVal) bool {
-		return a.(int64) == b.(int64)
+		switch v := a.(type) {
+		case NodeTSVal:
+			return v == b.(NodeTSVal)
+
+		case TripleTSVal:
+			w := b.(TripleTSVal)
+			return v[0] == w[0] && v[1] == w[1] && v[2] == w[2] && v[3] == w[3] && v[4] == w[4]
+		}
+		return false
 	})
 }
 
@@ -159,34 +224,55 @@ func (t *TripleStore) MakeFixed() *graph.FixedIterator {
 func (t *TripleStore) GetIdFor(name string) graph.TSVal {
 	res, ok := t.idCache.RevGet(name)
 	if ok {
-		return res
+		return NodeTSVal(res)
 	}
 
 	r := t.db.QueryRowx("SELECT id FROM nodes WHERE name=$1;", name)
-	r.Scan(&res) // ignore error
-
-	t.idCache.Put(res, name)
-	return res
+	err := r.Scan(&res)
+	if err != nil {
+		if err != sql.ErrNoRows {
+			glog.Fatalln(err.Error())
+		}
+	} else {
+		t.idCache.Put(res, name)
+	}
+	return NodeTSVal(res)
 }
 
 // Given an opaque token, return the node that it represents.
 func (t *TripleStore) GetNameFor(oid graph.TSVal) (res string) {
-	val, ok := t.idCache.Get(oid.(int64))
+	var nid int64
+	switch v := oid.(type) {
+	case int64:
+		nid = v
+	case NodeTSVal:
+		nid = int64(v)
+	}
+
+	val, ok := t.idCache.Get(nid)
 	if ok {
 		return val
 	}
 
-	r := t.db.QueryRowx("SELECT name FROM nodes WHERE id=$1;", oid.(int64))
-	r.Scan(&res) // ignore error
-
-	t.idCache.Put(oid.(int64), res)
+	r := t.db.QueryRowx("SELECT name FROM nodes WHERE id=$1;", nid)
+	err := r.Scan(&res)
+	if err != nil {
+		if err != sql.ErrNoRows {
+			glog.Fatalln(err.Error())
+		}
+	} else {
+		t.idCache.Put(nid, res)
+	}
 	return
 }
 
 // Returns the number of triples currently stored.
 func (t *TripleStore) Size() (res int64) {
 	r := t.db.QueryRowx("SELECT COUNT(*) FROM triples;")
-	r.Scan(&res) // ignore error
+	err := r.Scan(&res)
+	if err != nil {
+		glog.Fatalln(err.Error())
+	}
 	return
 }
 
@@ -204,8 +290,18 @@ func (t *TripleStore) Close() {
 // Iterators will call this. At worst, a valid implementation is
 // self.GetIdFor(self.GetTriple(triple_id).Get(dir))
 func (t *TripleStore) GetTripleDirection(triple_id graph.TSVal, dir string) graph.TSVal {
-	// TODO: replace stub implementation
-	return t.GetIdFor(t.GetTriple(triple_id).Get(dir))
+	trv := triple_id.(TripleTSVal)
+	switch dir {
+	case "s":
+		return trv[1]
+	case "p":
+		return trv[2]
+	case "o":
+		return trv[3]
+	case "c":
+		return trv[4]
+	}
+	return trv[0]
 }
 
 func (ts *TripleStore) OptimizeIterator(it graph.Iterator) (graph.Iterator, bool) {
