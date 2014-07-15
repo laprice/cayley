@@ -98,7 +98,7 @@ func (it *NodeIterator) Clone() graph.Iterator {
 	return newM
 }
 
-func (it *NodeIterator) Next() (graph.TSVal, bool) {
+func (it *NodeIterator) Next() (graph.Value, bool) {
 	var tid int64
 	graph.NextLogIn(it)
 
@@ -109,11 +109,11 @@ func (it *NodeIterator) Next() (graph.TSVal, bool) {
 		}
 		return graph.NextLogOut(it, nil, false)
 	}
-	it.Last = NodeTSVal(tid)
-	return graph.NextLogOut(it, NodeTSVal(tid), true)
+	it.Last = NodeValue(tid)
+	return graph.NextLogOut(it, NodeValue(tid), true)
 }
 
-func (it *NodeIterator) Check(v graph.TSVal) bool {
+func (it *NodeIterator) Check(v graph.Value) bool {
 	graph.CheckLogIn(it, v)
 	it.Last = v
 	return graph.CheckLogOut(it, v, true)
@@ -123,8 +123,8 @@ func (it *NodeIterator) Size() (int64, bool) {
 	return it.size, true
 }
 
-func (it *NodeIterator) Type() string {
-	return "postgres-all-nodes"
+func (it *NodeIterator) Type() graph.Type {
+	return graph.All
 }
 
 func (it *NodeIterator) Sorted() bool                     { return false }

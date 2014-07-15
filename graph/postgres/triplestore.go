@@ -29,8 +29,8 @@ type TripleStore struct {
 	idCache *IDLru
 }
 
-type TripleTSVal [5]int64
-type NodeTSVal int64
+type TripleValue [5]int64
+type NodeValue int64
 
 const pgSchema = `
 
@@ -55,7 +55,7 @@ CREATE INDEX triple_obj_idx ON triples(obj);
 CREATE INDEX triple_prov_idx ON triples(prov);
 `
 
-func CreateNewPostgresGraph(addr string, options graph.OptionsDict) bool {
+func CreateNewPostgresGraph(addr string, options graph.Options) bool {
 	t := NewTripleStore(addr, options)
 	defer t.Close()
 	_, err := t.db.Exec(pgSchema)
@@ -67,7 +67,7 @@ func CreateNewPostgresGraph(addr string, options graph.OptionsDict) bool {
 }
 
 // addr = "user=username dbname=dbname"
-func NewTripleStore(addr string, options graph.OptionsDict) *TripleStore {
+func NewTripleStore(addr string, options graph.Options) *TripleStore {
 	db, err := sqlx.Connect("postgres", addr+" sslmode=disable")
 	if err != nil {
 		glog.Fatalln(err.Error())
@@ -143,11 +143,11 @@ func (t *TripleStore) RemoveTriple(x *graph.Triple) {
 }
 
 // Given an opaque token, returns the triple for that token from the store.
-func (t *TripleStore) GetTriple(tid graph.TSVal) (tr *graph.Triple) {
+func (t *TripleStore) Triple(tid graph.Value) (tr *graph.Triple) {
 	ok := false
 	gotAll := true
 	tr = &graph.Triple{}
-	trv := tid.(TripleTSVal)
+	trv := tid.(TripleValue)
 
 	tr.Subject, ok = t.idCache.Get(trv[1])
 	gotAll = gotAll && ok
@@ -192,28 +192,28 @@ func (t *TripleStore) GetTriple(tid graph.TSVal) (tr *graph.Triple) {
 
 // Given a direction and a token, creates an iterator of links which have
 // that node token in that directional field.
-func (ts *TripleStore) GetTripleIterator(dir graph.Direction, val graph.TSVal) graph.Iterator {
+func (ts *TripleStore) TripleIterator(dir graph.Direction, val graph.Value) graph.Iterator {
 	return NewTripleIterator(ts, dir, val)
 }
 
 // Returns an iterator enumerating all nodes in the graph.
-func (ts *TripleStore) GetNodesAllIterator() graph.Iterator {
+func (ts *TripleStore) NodesAllIterator() graph.Iterator {
 	return NewNodeIterator(ts)
 }
 
 // Returns an iterator enumerating all links in the graph.
-func (ts *TripleStore) GetTriplesAllIterator() graph.Iterator {
+func (ts *TripleStore) TriplesAllIterator() graph.Iterator {
 	return NewAllIterator(ts)
 }
 
 func (t *TripleStore) FixedIterator() graph.FixedIterator {
-	return iterator.NewFixedIteratorWithCompare(func(a, b graph.TSVal) bool {
+	return iterator.NewFixedIteratorWithCompare(func(a, b graph.Value) bool {
 		switch v := a.(type) {
-		case NodeTSVal:
-			return v == b.(NodeTSVal)
+		case NodeValue:
+			return v == b.(NodeValue)
 
-		case TripleTSVal:
-			w := b.(TripleTSVal)
+		case TripleValue:
+			w := b.(TripleValue)
 			return v[0] == w[0] && v[1] == w[1] && v[2] == w[2] && v[3] == w[3] && v[4] == w[4]
 		}
 		return false
@@ -222,10 +222,10 @@ func (t *TripleStore) FixedIterator() graph.FixedIterator {
 
 // Given a node ID, return the opaque token used by the TripleStore
 // to represent that id.
-func (t *TripleStore) GetIdFor(name string) graph.TSVal {
+func (t *TripleStore) ValueOf(name string) graph.Value {
 	res, ok := t.idCache.RevGet(name)
 	if ok {
-		return NodeTSVal(res)
+		return NodeValue(res)
 	}
 
 	r := t.db.QueryRowx("SELECT id FROM nodes WHERE name=$1;", name)
@@ -237,16 +237,16 @@ func (t *TripleStore) GetIdFor(name string) graph.TSVal {
 	} else {
 		t.idCache.Put(res, name)
 	}
-	return NodeTSVal(res)
+	return NodeValue(res)
 }
 
 // Given an opaque token, return the node that it represents.
-func (t *TripleStore) GetNameFor(oid graph.TSVal) (res string) {
+func (t *TripleStore) NameOf(oid graph.Value) (res string) {
 	var nid int64
 	switch v := oid.(type) {
 	case int64:
 		nid = v
-	case NodeTSVal:
+	case NodeValue:
 		nid = int64(v)
 	}
 
@@ -287,11 +287,8 @@ func (t *TripleStore) Close() {
 // return the node token for that direction. Sometimes, a TripleStore
 // can do this without going all the way to the backing store, and
 // gives the TripleStore the opportunity to make this optimization.
-//
-// Iterators will call this. At worst, a valid implementation is
-// self.GetIdFor(self.GetTriple(triple_id).Get(dir))
-func (t *TripleStore) GetTripleDirection(triple_id graph.TSVal, dir graph.Direction) graph.TSVal {
-	trv := triple_id.(TripleTSVal)
+func (t *TripleStore) TripleDirection(triple_id graph.Value, dir graph.Direction) graph.Value {
+	trv := triple_id.(TripleValue)
 	switch dir {
 	case graph.Subject:
 		return trv[1]
@@ -307,7 +304,7 @@ func (t *TripleStore) GetTripleDirection(triple_id graph.TSVal, dir graph.Direct
 
 func (ts *TripleStore) OptimizeIterator(it graph.Iterator) (graph.Iterator, bool) {
 	switch it.Type() {
-	case "linksto":
+	case graph.LinksTo:
 		return ts.optimizeLinksTo(it.(*iterator.LinksTo))
 
 	}
@@ -315,19 +312,19 @@ func (ts *TripleStore) OptimizeIterator(it graph.Iterator) (graph.Iterator, bool
 }
 
 func (ts *TripleStore) optimizeLinksTo(it *iterator.LinksTo) (graph.Iterator, bool) {
-	l := it.GetSubIterators()
+	l := it.SubIterators()
 	if len(l) != 1 {
 		return it, false
 	}
 	primaryIt := l[0]
-	if primaryIt.Type() == "fixed" {
+	if primaryIt.Type() == graph.Fixed {
 		size, _ := primaryIt.Size()
 		if size == 1 {
 			val, ok := primaryIt.Next()
 			if !ok {
 				panic("Sizes lie")
 			}
-			newIt := ts.GetTripleIterator(it.Direction(), val)
+			newIt := ts.TripleIterator(it.Direction(), val)
 			newIt.CopyTagsFrom(it)
 			for _, tag := range primaryIt.Tags() {
 				newIt.AddFixedTag(tag, val)

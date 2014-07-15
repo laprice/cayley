@@ -31,7 +31,7 @@ type TripleIterator struct {
 	tx     *sqlx.Tx
 	ts     *TripleStore
 	dir    graph.Direction
-	val    NodeTSVal
+	val    NodeValue
 	size   int64
 	isAll  bool
 	isNode bool
@@ -40,7 +40,7 @@ type TripleIterator struct {
 	cursorName string
 }
 
-func NewTripleIterator(ts *TripleStore, dir graph.Direction, val graph.TSVal) *TripleIterator {
+func NewTripleIterator(ts *TripleStore, dir graph.Direction, val graph.Value) *TripleIterator {
 	var m TripleIterator
 	iterator.BaseInit(&m.Base)
 
@@ -55,7 +55,7 @@ func NewTripleIterator(ts *TripleStore, dir graph.Direction, val graph.TSVal) *T
 
 	if dir != graph.Any {
 		m.dir = dir
-		m.val = val.(NodeTSVal)
+		m.val = val.(NodeValue)
 		where := ""
 		switch dir {
 
@@ -141,11 +141,11 @@ func (it *TripleIterator) Clone() graph.Iterator {
 	return newM
 }
 
-func (it *TripleIterator) Next() (graph.TSVal, bool) {
+func (it *TripleIterator) Next() (graph.Value, bool) {
 	graph.NextLogIn(it)
 
 	var nullProv sql.NullInt64
-	var trv TripleTSVal
+	var trv TripleValue
 	r := it.tx.QueryRowx("FETCH NEXT FROM " + it.cursorName + ";")
 	if err := r.Scan(&trv[0], &trv[1], &trv[2], &trv[3], &nullProv); err != nil {
 		if err != sql.ErrNoRows {
@@ -163,14 +163,14 @@ func (it *TripleIterator) Next() (graph.TSVal, bool) {
 	return graph.NextLogOut(it, trv, true)
 }
 
-func (it *TripleIterator) Check(v graph.TSVal) bool {
+func (it *TripleIterator) Check(v graph.Value) bool {
 	graph.CheckLogIn(it, v)
 	if it.dir == graph.Any {
 		it.Last = v
 		return graph.CheckLogOut(it, v, true)
 	}
 
-	trv := v.(TripleTSVal)
+	trv := v.(TripleValue)
 	hit := 0
 	r := it.tx.QueryRowx("SELECT COUNT(*) FROM ("+it.sqlQuery+") x WHERE x.id=$2;", it.val, trv[0])
 	err := r.Scan(&hit)
@@ -188,11 +188,11 @@ func (it *TripleIterator) Size() (int64, bool) {
 	return it.size, true
 }
 
-func (it *TripleIterator) Type() string {
+func (it *TripleIterator) Type() graph.Type {
 	if it.isAll {
-		return "all"
+		return graph.All
 	}
-	return "postgres"
+	return postgresType
 }
 func (it *TripleIterator) Sorted() bool                     { return false }
 func (it *TripleIterator) Optimize() (graph.Iterator, bool) { return it, false }
@@ -201,7 +201,7 @@ func (it *TripleIterator) DebugString(indent int) string {
 	if it.dir == graph.Any {
 		return fmt.Sprintf("%s(%s size:%d ALL)", strings.Repeat(" ", indent), it.Type(), it.size)
 	}
-	return fmt.Sprintf("%s(%s size:%d %s %s)", strings.Repeat(" ", indent), it.Type(), it.size, it.val, it.ts.GetNameFor(it.val))
+	return fmt.Sprintf("%s(%s size:%d %s %s)", strings.Repeat(" ", indent), it.Type(), it.size, it.val, it.ts.NameOf(it.val))
 }
 
 func (it *TripleIterator) GetStats() *graph.IteratorStats {
@@ -211,4 +211,10 @@ func (it *TripleIterator) GetStats() *graph.IteratorStats {
 		NextCost:  1,
 		Size:      size,
 	}
+}
+
+var postgresType graph.Type
+
+func init() {
+	postgresType = graph.Register("postgres")
 }
