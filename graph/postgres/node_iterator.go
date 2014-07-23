@@ -74,7 +74,7 @@ func (it *NodeIterator) Reset() {
 }
 
 func (it *NodeIterator) Close() {
-	it.tx.MustExec("CLOSE " + it.cursorName + ";")
+	it.tx.Exec("CLOSE " + it.cursorName + ";")
 	it.tx.Commit()
 }
 

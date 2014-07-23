@@ -54,8 +54,14 @@ func NewTripleIterator(ts *TripleStore, dir graph.Direction, val graph.Value) *T
 	}
 
 	if dir != graph.Any {
+		var ok bool
 		m.dir = dir
-		m.val = val.(NodeValue)
+		m.val, ok = val.(NodeValue)
+		if !ok {
+			var v2 int64
+			v2, ok = val.(int64)
+			m.val = NodeValue(v2)
+		}
 		where := ""
 		switch dir {
 
@@ -112,7 +118,7 @@ func (it *TripleIterator) Reset() {
 }
 
 func (it *TripleIterator) Close() {
-	it.tx.MustExec("CLOSE " + it.cursorName + ";")
+	it.tx.Exec("CLOSE " + it.cursorName + ";")
 	it.tx.Commit()
 }
 
@@ -216,5 +222,5 @@ func (it *TripleIterator) GetStats() *graph.IteratorStats {
 var postgresType graph.Type
 
 func init() {
-	postgresType = graph.Register("postgres")
+	postgresType = graph.RegisterIterator("postgres")
 }

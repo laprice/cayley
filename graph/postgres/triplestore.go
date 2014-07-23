@@ -55,28 +55,26 @@ CREATE INDEX triple_obj_idx ON triples(obj);
 CREATE INDEX triple_prov_idx ON triples(prov);
 `
 
-func CreateNewPostgresGraph(addr string, options graph.Options) bool {
-	t := NewTripleStore(addr, options)
-	defer t.Close()
-	_, err := t.db.Exec(pgSchema)
-	if err != nil {
-		glog.Fatalln(err)
-		return false
+func createNewPostgresGraph(addr string, options graph.Options) error {
+	t, err := newTripleStore(addr, options)
+	if err == nil {
+		defer t.Close()
+		_, err = t.(*TripleStore).db.Exec(pgSchema)
 	}
-	return true
+	return err
 }
 
 // addr = "user=username dbname=dbname"
-func NewTripleStore(addr string, options graph.Options) *TripleStore {
+func newTripleStore(addr string, options graph.Options) (graph.TripleStore, error) {
 	db, err := sqlx.Connect("postgres", addr+" sslmode=disable")
 	if err != nil {
-		glog.Fatalln(err.Error())
+		return nil, err
 	}
 
 	return &TripleStore{
 		db:      db,
 		idCache: NewIDLru(1 << 16),
-	}
+	}, nil
 }
 
 func (t *TripleStore) getOrCreateNode(name string) int64 {
@@ -334,4 +332,8 @@ func (ts *TripleStore) optimizeLinksTo(it *iterator.LinksTo) (graph.Iterator, bo
 		}
 	}
 	return it, false
+}
+
+func init() {
+	graph.RegisterTripleStore("postgres", newTripleStore, createNewPostgresGraph)
 }
