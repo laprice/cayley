@@ -191,7 +191,12 @@ func (t *TripleStore) Triple(tid graph.Value) (tr *graph.Triple) {
 // Given a direction and a token, creates an iterator of links which have
 // that node token in that directional field.
 func (ts *TripleStore) TripleIterator(dir graph.Direction, val graph.Value) graph.Iterator {
-	return NewTripleIterator(ts, dir, val)
+	it := NewTripleIterator(ts, dir, val)
+	if it.size == 0 {
+		it.Close()
+		return iterator.NewNull()
+	}
+	return it
 }
 
 // Returns an iterator enumerating all nodes in the graph.
@@ -208,7 +213,10 @@ func (t *TripleStore) FixedIterator() graph.FixedIterator {
 	return iterator.NewFixedIteratorWithCompare(func(a, b graph.Value) bool {
 		switch v := a.(type) {
 		case NodeValue:
-			return v == b.(NodeValue)
+			if bv, ok := b.(NodeValue); ok {
+				return v == bv
+			}
+			return v == NodeValue(b.(int64))
 
 		case TripleValue:
 			w := b.(TripleValue)
