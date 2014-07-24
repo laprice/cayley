@@ -308,40 +308,28 @@ func (t *TripleStore) TripleDirection(triple_id graph.Value, dir graph.Direction
 	return trv[0]
 }
 
-func (ts *TripleStore) OptimizeIterator(it graph.Iterator) (graph.Iterator, bool) {
-	switch it.Type() {
-	case graph.LinksTo:
-		return ts.optimizeLinksTo(it.(*iterator.LinksTo))
-
-	}
-	return it, false
-}
-
-func (ts *TripleStore) optimizeLinksTo(it *iterator.LinksTo) (graph.Iterator, bool) {
-	l := it.SubIterators()
-	if len(l) != 1 {
-		return it, false
-	}
-	primaryIt := l[0]
-	if primaryIt.Type() == graph.Fixed {
-		size, _ := primaryIt.Size()
-		if size == 1 {
-			val, ok := primaryIt.Next()
-			if !ok {
-				panic("Sizes lie")
-			}
-			newIt := ts.TripleIterator(it.Direction(), val)
-			newIt.CopyTagsFrom(it)
-			for _, tag := range primaryIt.Tags() {
-				newIt.AddFixedTag(tag, val)
-			}
-			it.Close()
-			return newIt, true
-		}
-	}
-	return it, false
-}
+var postgresType graph.Type
+var postgresAllType graph.Type
+var postgresNodeType graph.Type
 
 func init() {
+	postgresType = graph.RegisterIterator("postgres")
+	postgresAllType = graph.RegisterIterator("postgres-all-nodes")
+	postgresNodeType = graph.RegisterIterator("postgres-nodes")
+
 	graph.RegisterTripleStore("postgres", newTripleStore, createNewPostgresGraph)
+}
+
+func dirToSchema(dir graph.Direction) string {
+	switch dir {
+	case graph.Subject:
+		return "subj"
+	case graph.Predicate:
+		return "pred"
+	case graph.Object:
+		return "obj"
+	case graph.Provenance:
+		return "prov"
+	}
+	return "null"
 }

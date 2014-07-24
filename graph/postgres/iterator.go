@@ -28,16 +28,23 @@ import (
 
 type TripleIterator struct {
 	iterator.Base
-	tx     *sqlx.Tx
-	ts     *TripleStore
-	dir    graph.Direction
-	val    NodeValue
-	size   int64
-	isAll  bool
-	isNode bool
+	tx   *sqlx.Tx
+	ts   *TripleStore
+	dir  graph.Direction
+	val  NodeValue
+	size int64
 
 	sqlQuery   string
+	sqlWhere   string
 	cursorName string
+}
+
+func (it *TripleIterator) sqlClause() string {
+	if it.sqlWhere != "" {
+		return it.sqlWhere
+	}
+
+	return fmt.Sprintf("%s=%d", dirToSchema(it.dir), int64(it.val))
 }
 
 func NewTripleIterator(ts *TripleStore, dir graph.Direction, val graph.Value) *TripleIterator {
@@ -53,27 +60,16 @@ func NewTripleIterator(ts *TripleStore, dir graph.Direction, val graph.Value) *T
 		return nil
 	}
 
+	m.dir = dir
 	if dir != graph.Any {
 		var ok bool
-		m.dir = dir
 		m.val, ok = val.(NodeValue)
 		if !ok {
 			var v2 int64
 			v2, ok = val.(int64)
 			m.val = NodeValue(v2)
 		}
-		where := ""
-		switch dir {
-
-		case graph.Subject:
-			where = " WHERE subj=$1"
-		case graph.Predicate:
-			where = " WHERE pred=$1"
-		case graph.Object:
-			where = " WHERE obj=$1"
-		case graph.Provenance:
-			where = " WHERE prov=$1"
-		}
+		where := fmt.Sprintf(" WHERE %s=$1", dirToSchema(dir))
 		r := m.tx.QueryRowx("SELECT COUNT(*) FROM triples"+where, m.val)
 		err = r.Scan(&m.size)
 		if err != nil {
@@ -92,6 +88,37 @@ func NewTripleIterator(ts *TripleStore, dir graph.Direction, val graph.Value) *T
 		}
 		m.tx.MustExec("DECLARE " + m.cursorName + " CURSOR FOR " + m.sqlQuery + ";")
 	}
+
+	m.ts = ts
+	return &m
+}
+
+func NewTripleIteratorWhere(ts *TripleStore, where string) *TripleIterator {
+	var m TripleIterator
+	iterator.BaseInit(&m.Base)
+
+	m.cursorName = "j" + strings.Replace(uuid.NewRandom().String(), "-", "", -1)
+	m.sqlQuery = "SELECT id, subj, pred, obj, prov FROM triples WHERE "
+	var err error
+	m.tx, err = ts.db.Beginx()
+	if err != nil {
+		glog.Fatalln(err.Error())
+		return nil
+	}
+
+	m.sqlWhere = where
+	m.dir = graph.Any
+	m.val = NodeValue(0)
+
+	r := m.tx.QueryRowx("SELECT COUNT(*) FROM triples WHERE " + where)
+	err = r.Scan(&m.size)
+	if err != nil {
+		glog.Fatalln("select count failed "+where, err.Error())
+		return nil
+	}
+	m.sqlQuery += where
+	m.tx.MustExec("DECLARE " + m.cursorName + " CURSOR FOR " + m.sqlQuery + ";")
+	fmt.Println(m.sqlQuery)
 
 	m.ts = ts
 	return &m
@@ -118,8 +145,11 @@ func (it *TripleIterator) Reset() {
 }
 
 func (it *TripleIterator) Close() {
-	it.tx.Exec("CLOSE " + it.cursorName + ";")
-	it.tx.Commit()
+	if it.tx != nil {
+		it.tx.Exec("CLOSE " + it.cursorName + ";")
+		it.tx.Commit()
+		it.tx = nil
+	}
 }
 
 func (it *TripleIterator) Clone() graph.Iterator {
@@ -195,7 +225,7 @@ func (it *TripleIterator) Size() (int64, bool) {
 }
 
 func (it *TripleIterator) Type() graph.Type {
-	if it.isAll {
+	if it.sqlWhere == "" && it.dir == graph.Any {
 		return graph.All
 	}
 	return postgresType
@@ -204,10 +234,15 @@ func (it *TripleIterator) Sorted() bool                     { return false }
 func (it *TripleIterator) Optimize() (graph.Iterator, bool) { return it, false }
 
 func (it *TripleIterator) DebugString(indent int) string {
+	if it.sqlWhere != "" {
+		return fmt.Sprintf("%s(%s size:%d WHERE %s)", strings.Repeat(" ", indent), it.Type(), it.size,
+			it.sqlWhere)
+	}
 	if it.dir == graph.Any {
 		return fmt.Sprintf("%s(%s size:%d ALL)", strings.Repeat(" ", indent), it.Type(), it.size)
 	}
-	return fmt.Sprintf("%s(%s size:%d %s %s)", strings.Repeat(" ", indent), it.Type(), it.size, it.val, it.ts.NameOf(it.val))
+	return fmt.Sprintf("%s(%s size:%d %s=%s)", strings.Repeat(" ", indent), it.Type(), it.size,
+		it.dir, it.ts.NameOf(it.val))
 }
 
 func (it *TripleIterator) GetStats() *graph.IteratorStats {
@@ -217,10 +252,4 @@ func (it *TripleIterator) GetStats() *graph.IteratorStats {
 		NextCost:  1,
 		Size:      size,
 	}
-}
-
-var postgresType graph.Type
-
-func init() {
-	postgresType = graph.RegisterIterator("postgres")
 }

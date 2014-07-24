@@ -26,14 +26,21 @@ import (
 	"github.com/google/cayley/graph/iterator"
 )
 
+const maxNodeCacheSize = 150
+
 type NodeIterator struct {
 	iterator.Base
 	tx   *sqlx.Tx
 	ts   *TripleStore
 	size int64
+	dir  graph.Direction
 
 	sqlQuery   string
+	sqlWhere   string
 	cursorName string
+
+	resultCache []NodeValue
+	cacheIndex  int
 }
 
 func NewNodeIterator(ts *TripleStore) *NodeIterator {
@@ -41,6 +48,7 @@ func NewNodeIterator(ts *TripleStore) *NodeIterator {
 	iterator.BaseInit(&m.Base)
 
 	m.sqlQuery = "SELECT id FROM nodes"
+	m.dir = graph.Any
 
 	var err error
 	m.tx, err = ts.db.Beginx()
@@ -49,6 +57,33 @@ func NewNodeIterator(ts *TripleStore) *NodeIterator {
 		return nil
 	}
 	r := m.tx.QueryRowx("SELECT COUNT(*) FROM nodes;")
+	err = r.Scan(&m.size)
+	if err != nil {
+		glog.Fatalln(err.Error())
+		return nil
+	}
+
+	m.cursorName = "j" + strings.Replace(uuid.NewRandom().String(), "-", "", -1)
+	m.tx.MustExec("DECLARE " + m.cursorName + " CURSOR FOR " + m.sqlQuery + ";")
+	m.ts = ts
+	return &m
+}
+
+func NewNodeIteratorWhere(ts *TripleStore, dir graph.Direction, where string) *NodeIterator {
+	var m NodeIterator
+	iterator.BaseInit(&m.Base)
+
+	m.dir = dir
+	m.sqlWhere = where
+	m.sqlQuery = "SELECT " + dirToSchema(m.dir) + " FROM triples WHERE " + m.sqlWhere
+
+	var err error
+	m.tx, err = ts.db.Beginx()
+	if err != nil {
+		glog.Fatalln(err.Error())
+		return nil
+	}
+	r := m.tx.QueryRowx("SELECT COUNT(*) FROM nodes WHERE id IN (" + m.sqlQuery + ")")
 	err = r.Scan(&m.size)
 	if err != nil {
 		glog.Fatalln(err.Error())
@@ -74,8 +109,11 @@ func (it *NodeIterator) Reset() {
 }
 
 func (it *NodeIterator) Close() {
-	it.tx.Exec("CLOSE " + it.cursorName + ";")
-	it.tx.Commit()
+	if it.tx != nil {
+		it.tx.Exec("CLOSE " + it.cursorName + ";")
+		it.tx.Commit()
+		it.tx = nil
+	}
 }
 
 func (it *NodeIterator) Clone() graph.Iterator {
@@ -84,6 +122,8 @@ func (it *NodeIterator) Clone() graph.Iterator {
 	newM.ts = it.ts
 	newM.size = it.size
 	newM.sqlQuery = it.sqlQuery
+	newM.sqlWhere = it.sqlWhere
+	newM.dir = it.dir
 
 	var err error
 	newM.cursorName = "j" + strings.Replace(uuid.NewRandom().String(), "-", "", -1)
@@ -99,8 +139,15 @@ func (it *NodeIterator) Clone() graph.Iterator {
 }
 
 func (it *NodeIterator) Next() (graph.Value, bool) {
-	var tid int64
 	graph.NextLogIn(it)
+	if it.size == int64(len(it.resultCache)) {
+		it.cacheIndex++
+		if int64(it.cacheIndex) >= it.size {
+			return graph.NextLogOut(it, nil, false)
+		}
+		return graph.NextLogOut(it, it.resultCache[it.cacheIndex], true)
+	}
+	var tid int64
 
 	r := it.tx.QueryRowx("FETCH NEXT FROM " + it.cursorName + ";")
 	if err := r.Scan(&tid); err != nil {
@@ -110,13 +157,52 @@ func (it *NodeIterator) Next() (graph.Value, bool) {
 		return graph.NextLogOut(it, nil, false)
 	}
 	it.Last = NodeValue(tid)
+	if it.size <= maxNodeCacheSize {
+		it.resultCache = append(it.resultCache, NodeValue(tid))
+	}
 	return graph.NextLogOut(it, NodeValue(tid), true)
 }
 
 func (it *NodeIterator) Check(v graph.Value) bool {
 	graph.CheckLogIn(it, v)
-	it.Last = v
-	return graph.CheckLogOut(it, v, true)
+	if it.sqlWhere == "" {
+		it.Last = v
+		return graph.CheckLogOut(it, v, true)
+	}
+	if it.size > maxNodeCacheSize {
+		fmt.Println("gotta do a slow check...")
+	}
+
+	// check the cache
+	for _, v2 := range it.resultCache {
+		if v2 == v {
+			it.Last = v
+			return graph.CheckLogOut(it, v, true)
+		}
+	}
+
+	// if the cache is full, then not found
+	if it.size == int64(len(it.resultCache)) {
+		return graph.CheckLogOut(it, v, false)
+	}
+
+	lastLast := it.Last
+	curIndex := it.cacheIndex
+	for {
+		v2, ok := it.Next()
+		if ok && v2 == v {
+			it.cacheIndex = curIndex
+			it.Last = v
+			return graph.CheckLogOut(it, v, true)
+		}
+		if !ok {
+			it.cacheIndex = curIndex
+			it.Last = lastLast
+			break
+		}
+	}
+
+	return graph.CheckLogOut(it, v, false)
 }
 
 func (it *NodeIterator) Size() (int64, bool) {
@@ -124,14 +210,18 @@ func (it *NodeIterator) Size() (int64, bool) {
 }
 
 func (it *NodeIterator) Type() graph.Type {
-	return graph.All
+	if it.sqlWhere != "" {
+		return postgresNodeType
+	}
+	return postgresAllType
 }
 
 func (it *NodeIterator) Sorted() bool                     { return false }
 func (it *NodeIterator) Optimize() (graph.Iterator, bool) { return it, false }
 
 func (it *NodeIterator) DebugString(indent int) string {
-	return fmt.Sprintf("%s(%s size:%d %s %s)", strings.Repeat(" ", indent), it.Type(), it.size)
+	return fmt.Sprintf("%s(%s size:%d %s %s)", strings.Repeat(" ", indent), it.Type(), it.size,
+		it.dir, it.sqlWhere)
 }
 
 func (it *NodeIterator) GetStats() *graph.IteratorStats {
