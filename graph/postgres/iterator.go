@@ -54,11 +54,8 @@ func NewTripleIterator(ts *TripleStore, dir graph.Direction, val graph.Value) *T
 	m.cursorName = "j" + strings.Replace(uuid.NewRandom().String(), "-", "", -1)
 	m.sqlQuery = "SELECT id, subj, pred, obj, prov FROM triples"
 	var err error
-	m.tx, err = ts.db.Beginx()
-	if err != nil {
-		glog.Fatalln(err.Error())
-		return nil
-	}
+	m.tx = nil
+	m.ts = ts
 
 	m.dir = dir
 	if dir != graph.Any {
@@ -70,27 +67,37 @@ func NewTripleIterator(ts *TripleStore, dir graph.Direction, val graph.Value) *T
 			m.val = NodeValue(v2)
 		}
 		where := fmt.Sprintf(" WHERE %s=$1", dirToSchema(dir))
-		r := m.tx.QueryRowx("SELECT COUNT(*) FROM triples"+where, m.val)
+		r := ts.db.QueryRowx("SELECT COUNT(*) FROM triples"+where, m.val)
 		err = r.Scan(&m.size)
 		if err != nil {
 			glog.Fatalln(err.Error())
 			return nil
 		}
 		m.sqlQuery += where
-		m.tx.MustExec("DECLARE "+m.cursorName+" CURSOR FOR "+m.sqlQuery+";", m.val)
 
 	} else {
-		r := m.tx.QueryRowx("SELECT COUNT(*) FROM triples;")
+		r := ts.db.QueryRowx("SELECT COUNT(*) FROM triples;")
 		err = r.Scan(&m.size)
 		if err != nil {
 			glog.Fatalln(err.Error())
 			return nil
 		}
-		m.tx.MustExec("DECLARE " + m.cursorName + " CURSOR FOR " + m.sqlQuery + ";")
 	}
 
-	m.ts = ts
 	return &m
+}
+
+func (it *TripleIterator) beginTx() error {
+	var err error
+	it.tx, err = it.ts.db.Beginx()
+	if err == nil {
+		if it.dir == graph.Any {
+			_, err = it.tx.Exec("DECLARE " + it.cursorName + " CURSOR FOR " + it.sqlQuery + ";")
+		} else {
+			_, err = it.tx.Exec("DECLARE "+it.cursorName+" CURSOR FOR "+it.sqlQuery+";", it.val)
+		}
+	}
+	return err
 }
 
 func NewTripleIteratorWhere(ts *TripleStore, where string) *TripleIterator {
@@ -100,27 +107,21 @@ func NewTripleIteratorWhere(ts *TripleStore, where string) *TripleIterator {
 	m.cursorName = "j" + strings.Replace(uuid.NewRandom().String(), "-", "", -1)
 	m.sqlQuery = "SELECT id, subj, pred, obj, prov FROM triples WHERE "
 	var err error
-	m.tx, err = ts.db.Beginx()
-	if err != nil {
-		glog.Fatalln(err.Error())
-		return nil
-	}
+	m.tx = nil
+	m.ts = ts
 
 	m.sqlWhere = where
 	m.dir = graph.Any
 	m.val = NodeValue(0)
 
-	r := m.tx.QueryRowx("SELECT COUNT(*) FROM triples WHERE " + where)
+	r := ts.db.QueryRowx("SELECT COUNT(*) FROM triples WHERE " + where)
 	err = r.Scan(&m.size)
 	if err != nil {
 		glog.Fatalln("select count failed "+where, err.Error())
 		return nil
 	}
 	m.sqlQuery += where
-	m.tx.MustExec("DECLARE " + m.cursorName + " CURSOR FOR " + m.sqlQuery + ";")
-	fmt.Println(m.sqlQuery)
 
-	m.ts = ts
 	return &m
 }
 
@@ -129,19 +130,8 @@ func NewAllIterator(ts *TripleStore) *TripleIterator {
 }
 
 func (it *TripleIterator) Reset() {
-	var err error
-	it.tx.MustExec("CLOSE " + it.cursorName + ";")
-	it.tx.Commit()
-	it.tx, err = it.ts.db.Beginx()
-	if err != nil {
-		glog.Fatalln(err.Error())
-	}
-
-	if it.dir == graph.Any {
-		it.tx.MustExec("DECLARE " + it.cursorName + " CURSOR FOR " + it.sqlQuery + ";")
-	} else {
-		it.tx.MustExec("DECLARE "+it.cursorName+" CURSOR FOR "+it.sqlQuery+";", it.val)
-	}
+	// just Close, Next() will re-open
+	it.Close()
 }
 
 func (it *TripleIterator) Close() {
@@ -160,25 +150,19 @@ func (it *TripleIterator) Clone() graph.Iterator {
 	newM.ts = it.ts
 	newM.size = it.size
 	newM.sqlQuery = it.sqlQuery
-
-	var err error
 	newM.cursorName = "j" + strings.Replace(uuid.NewRandom().String(), "-", "", -1)
-	newM.tx, err = newM.ts.db.Beginx()
-	if err != nil {
-		glog.Fatalln(err.Error())
-		return nil
-	}
-	if newM.dir == graph.Any {
-		newM.tx.MustExec("DECLARE " + newM.cursorName + " CURSOR FOR " + newM.sqlQuery + ";")
-	} else {
-		newM.tx.MustExec("DECLARE "+newM.cursorName+" CURSOR FOR "+newM.sqlQuery+";", newM.val)
-	}
+	newM.tx = nil
 	newM.CopyTagsFrom(it)
 	return newM
 }
 
 func (it *TripleIterator) Next() (graph.Value, bool) {
 	graph.NextLogIn(it)
+	if it.tx == nil {
+		if err := it.beginTx(); err != nil {
+			glog.Fatalln("error beginning in Next() - ", err.Error())
+		}
+	}
 
 	var nullProv sql.NullInt64
 	var trv TripleValue
@@ -187,6 +171,7 @@ func (it *TripleIterator) Next() (graph.Value, bool) {
 		if err != sql.ErrNoRows {
 			glog.Errorln("Error Nexting Iterator: ", err)
 		}
+		it.Close()
 		return graph.NextLogOut(it, nil, false)
 	}
 	if nullProv.Valid {
@@ -204,6 +189,11 @@ func (it *TripleIterator) Check(v graph.Value) bool {
 	if it.dir == graph.Any {
 		it.Last = v
 		return graph.CheckLogOut(it, v, true)
+	}
+	if it.tx == nil {
+		if err := it.beginTx(); err != nil {
+			glog.Fatalln("error beginning in Check() - ", err.Error())
+		}
 	}
 
 	trv := v.(TripleValue)

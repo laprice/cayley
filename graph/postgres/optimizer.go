@@ -4,36 +4,49 @@ import (
 	"github.com/google/cayley/graph"
 	"github.com/google/cayley/graph/iterator"
 	"strings"
-
-	//"fmt"
 )
 
-func wrapIt(newIt, oldIt graph.Iterator) (graph.Iterator, bool) {
-	newIt.CopyTagsFrom(oldIt)
-	oldIt.Close()
-	return newIt, true
+func (ts *TripleStore) OptimizeIterator(it graph.Iterator) (graph.Iterator, bool) {
+	newIt, didChange := ts.recOptimizeIterator(it)
+	if didChange {
+		newIt.CopyTagsFrom(it)
+		it.Close()
+		return newIt, true
+	}
+	return it, false
 }
 
-func (ts *TripleStore) OptimizeIterator(it graph.Iterator) (graph.Iterator, bool) {
+func (ts *TripleStore) recOptimizeIterator(it graph.Iterator) (graph.Iterator, bool) {
 	switch it.Type() {
 	case graph.And:
-		if newIt, ok := ts.optimizeAnd(it.(*iterator.And)); ok {
-			return wrapIt(newIt, it)
+
+		newIt, ok := ts.optimizeAnd(it.(*iterator.And))
+		if ok {
+			for ok && newIt.Type() == graph.And {
+				newIt, ok = ts.optimizeAnd(newIt.(*iterator.And))
+			}
+			return newIt, true
 		}
+		return it, false
 
 	case graph.HasA:
 		hasa := it.(*iterator.HasA)
 		l2 := hasa.SubIterators()
 
-		newSub, changed := ts.OptimizeIterator(l2[0])
+		newSub, changed := ts.recOptimizeIterator(l2[0])
 		if changed {
-			if newSub.Type() == postgresType {
-				newNodeIt := NewNodeIteratorWhere(ts, hasa.Direction(), newSub.(*TripleIterator).sqlClause())
-				return wrapIt(newNodeIt, hasa)
-			}
-			newIt := iterator.NewHasA(ts, newSub, hasa.Direction())
-			return wrapIt(newIt, hasa)
+			l2[0] = newSub
 		}
+		newSub = l2[0]
+		if newSub.Type() == postgresType {
+			newNodeIt := NewNodeIteratorWhere(ts, hasa.Direction(), newSub.(*TripleIterator).sqlClause())
+			return newNodeIt, true
+		}
+		if changed {
+			newIt := iterator.NewHasA(ts, newSub, hasa.Direction())
+			return newIt, true
+		}
+		return it, false
 
 	case graph.LinksTo:
 		linksTo := it.(*iterator.LinksTo)
@@ -43,6 +56,12 @@ func (ts *TripleStore) OptimizeIterator(it graph.Iterator) (graph.Iterator, bool
 			panic("invalid linksto iterator")
 		}
 		sublink := l[0]
+
+		// linksto all nodes? sure...
+		if sublink.Type() == postgresAllType {
+			linksTo.Close()
+			return ts.TriplesAllIterator(), true
+		}
 
 		if sublink.Type() == graph.Fixed {
 			size, _ := sublink.Size()
@@ -55,38 +74,23 @@ func (ts *TripleStore) OptimizeIterator(it graph.Iterator) (graph.Iterator, bool
 				for _, tag := range sublink.Tags() {
 					newIt.AddFixedTag(tag, val)
 				}
-				return wrapIt(newIt, linksTo)
+				return newIt, true
 			}
 			// can't help help here
 			return it, false
 		}
 
-		newIt, ok := ts.OptimizeIterator(sublink)
+		newIt, ok := ts.recOptimizeIterator(sublink)
 		if ok {
-
 			pgIter, isPgIter := newIt.(*NodeIterator)
 			if isPgIter && pgIter.dir != graph.Any {
 				// SELECT * FROM triples WHERE <linksto.direction> IN (SELECT <pgIter.dir> FROM triples WHERE <pgIter.sqlWhere>)
 				newWhere := dirToSchema(linksTo.Direction()) + " IN ("
 				newWhere += pgIter.sqlQuery + ")"
-				return wrapIt(NewTripleIteratorWhere(ts, newWhere), linksTo)
-				/*
-					} else {
-						if newIt.Type() == graph.HasA {
-							pgIter, isTrip := newIt.SubIterators()[0].(*TripleIterator)
-							if isTrip {
-								// SELECT * FROM triples WHERE <linksto.direction> IN (SELECT <hasa.direction> FROM triples WHERE <pgIter.sqlClause>)
-								newWhere := dirToSchema(linksTo.Direction()) + " IN (SELECT "
-								newWhere += dirToSchema(newIt.(*iterator.HasA).Direction())
-								newWhere += " FROM triples WHERE " + pgIter.sqlClause() + ")"
-								return wrapIt(NewTripleIteratorWhere(ts, newWhere), linksTo)
-							}
-						}*/
+				return NewTripleIteratorWhere(ts, newWhere), true
 			}
 
-			newLt := iterator.NewLinksTo(ts, newIt, linksTo.Direction())
-			return wrapIt(newLt, linksTo)
-
+			return iterator.NewLinksTo(ts, newIt, linksTo.Direction()), true
 		}
 	}
 	return it, false
@@ -116,8 +120,8 @@ func (ts *TripleStore) optimizeAnd(and *iterator.And) (graph.Iterator, bool) {
 			if pit.dir == graph.Any {
 				panic("invalid postgresNodeType iterator")
 			}
-			if types != 0 || (types == 2 && nDir != pit.dir) {
-				// invalid!
+			if types == 1 || (types == 2 && nDir != pit.dir) {
+				//FIXME "cross-direction node join not implemented yet"
 				return and, false
 			}
 			types |= 2
@@ -142,7 +146,7 @@ func (ts *TripleStore) optimizeAnd(and *iterator.And) (graph.Iterator, bool) {
 	newIts := make([]graph.Iterator, len(subits))
 	didChange := false
 	for i, sub := range subits {
-		it, changed := ts.OptimizeIterator(sub)
+		it, changed := ts.recOptimizeIterator(sub)
 		if changed {
 			didChange = true
 			newIts[i] = it
@@ -155,17 +159,8 @@ func (ts *TripleStore) optimizeAnd(and *iterator.And) (graph.Iterator, bool) {
 			sub.Close()
 		}
 		newIt := iterator.NewAnd()
-		allPostgres = true
 		for _, newit := range newIts {
-			nt := newit.Type()
-			if !(nt == postgresType || nt == postgresAllType || nt == postgresNodeType) {
-				allPostgres = false
-			}
 			newIt.AddSubIterator(newit)
-		}
-		if allPostgres {
-			newIt2, _ := ts.optimizeAnd(newIt)
-			return newIt2, true
 		}
 		return newIt, true
 	}

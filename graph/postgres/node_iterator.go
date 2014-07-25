@@ -49,23 +49,18 @@ func NewNodeIterator(ts *TripleStore) *NodeIterator {
 
 	m.sqlQuery = "SELECT id FROM nodes"
 	m.dir = graph.Any
-
-	var err error
-	m.tx, err = ts.db.Beginx()
-	if err != nil {
-		glog.Fatalln(err.Error())
-		return nil
-	}
-	r := m.tx.QueryRowx("SELECT COUNT(*) FROM nodes;")
-	err = r.Scan(&m.size)
-	if err != nil {
-		glog.Fatalln(err.Error())
-		return nil
-	}
-
-	m.cursorName = "j" + strings.Replace(uuid.NewRandom().String(), "-", "", -1)
-	m.tx.MustExec("DECLARE " + m.cursorName + " CURSOR FOR " + m.sqlQuery + ";")
+	m.tx = nil
 	m.ts = ts
+	m.cursorName = "j" + strings.Replace(uuid.NewRandom().String(), "-", "", -1)
+	m.cacheIndex = -1
+
+	r := ts.db.QueryRowx("SELECT COUNT(*) FROM nodes;")
+	err := r.Scan(&m.size)
+	if err != nil {
+		glog.Fatalln(err.Error())
+		return nil
+	}
+
 	return &m
 }
 
@@ -76,36 +71,33 @@ func NewNodeIteratorWhere(ts *TripleStore, dir graph.Direction, where string) *N
 	m.dir = dir
 	m.sqlWhere = where
 	m.sqlQuery = "SELECT " + dirToSchema(m.dir) + " FROM triples WHERE " + m.sqlWhere
-
-	var err error
-	m.tx, err = ts.db.Beginx()
-	if err != nil {
-		glog.Fatalln(err.Error())
-		return nil
-	}
-	r := m.tx.QueryRowx("SELECT COUNT(*) FROM nodes WHERE id IN (" + m.sqlQuery + ")")
-	err = r.Scan(&m.size)
-	if err != nil {
-		glog.Fatalln(err.Error())
-		return nil
-	}
-
-	m.cursorName = "j" + strings.Replace(uuid.NewRandom().String(), "-", "", -1)
-	m.tx.MustExec("DECLARE " + m.cursorName + " CURSOR FOR " + m.sqlQuery + ";")
+	m.tx = nil
 	m.ts = ts
+	m.cursorName = "j" + strings.Replace(uuid.NewRandom().String(), "-", "", -1)
+	m.cacheIndex = -1
+
+	r := ts.db.QueryRowx("SELECT COUNT(*) FROM nodes WHERE id IN (" + m.sqlQuery + ")")
+	err := r.Scan(&m.size)
+	if err != nil {
+		glog.Fatalln(err.Error())
+		return nil
+	}
+
 	return &m
 }
 
-func (it *NodeIterator) Reset() {
+func (it *NodeIterator) beginTx() error {
 	var err error
-	it.tx.MustExec("CLOSE " + it.cursorName + ";")
-	it.tx.Commit()
 	it.tx, err = it.ts.db.Beginx()
-	if err != nil {
-		glog.Fatalln(err.Error())
+	if err == nil {
+		_, err = it.tx.Exec("DECLARE " + it.cursorName + " CURSOR FOR " + it.sqlQuery + ";")
 	}
+	return err
+}
 
-	it.tx.MustExec("DECLARE " + it.cursorName + " CURSOR FOR " + it.sqlQuery + ";")
+func (it *NodeIterator) Reset() {
+	// just Close, Next() will re-open
+	it.Close()
 }
 
 func (it *NodeIterator) Close() {
@@ -114,6 +106,7 @@ func (it *NodeIterator) Close() {
 		it.tx.Commit()
 		it.tx = nil
 	}
+	it.cacheIndex = -1
 }
 
 func (it *NodeIterator) Clone() graph.Iterator {
@@ -124,16 +117,10 @@ func (it *NodeIterator) Clone() graph.Iterator {
 	newM.sqlQuery = it.sqlQuery
 	newM.sqlWhere = it.sqlWhere
 	newM.dir = it.dir
-
-	var err error
+	newM.tx = nil
+	newM.cacheIndex = -1
+	newM.resultCache = it.resultCache
 	newM.cursorName = "j" + strings.Replace(uuid.NewRandom().String(), "-", "", -1)
-	newM.tx, err = newM.ts.db.Beginx()
-	if err != nil {
-		glog.Fatalln(err.Error())
-		return nil
-	}
-
-	newM.tx.MustExec("DECLARE " + newM.cursorName + " CURSOR FOR " + newM.sqlQuery + ";")
 	newM.CopyTagsFrom(it)
 	return newM
 }
@@ -149,11 +136,18 @@ func (it *NodeIterator) Next() (graph.Value, bool) {
 	}
 	var tid int64
 
+	if it.tx == nil {
+		if err := it.beginTx(); err != nil {
+			glog.Fatalln("error beginning in Next() - ", err.Error())
+		}
+	}
+
 	r := it.tx.QueryRowx("FETCH NEXT FROM " + it.cursorName + ";")
 	if err := r.Scan(&tid); err != nil {
 		if err != sql.ErrNoRows {
 			glog.Errorln("Error Nexting Iterator: ", err)
 		}
+		it.Close()
 		return graph.NextLogOut(it, nil, false)
 	}
 	it.Last = NodeValue(tid)
@@ -170,7 +164,20 @@ func (it *NodeIterator) Check(v graph.Value) bool {
 		return graph.CheckLogOut(it, v, true)
 	}
 	if it.size > maxNodeCacheSize {
-		fmt.Println("gotta do a slow check...")
+		// un-cachable triple-based query
+		var res int
+		SQL := "SELECT 1 FROM triples WHERE " + dirToSchema(it.dir) + "=$1::bigint AND " + it.sqlWhere
+		row := it.ts.db.QueryRowx(SQL, v)
+		err := row.Scan(&res)
+		if err != nil {
+			panic(err)
+		}
+		if res == 1 {
+			it.Last = v
+			return graph.CheckLogOut(it, v, true)
+		}
+
+		return graph.CheckLogOut(it, v, false)
 	}
 
 	// check the cache
