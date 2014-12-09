@@ -48,9 +48,12 @@ import (
 	_ "github.com/google/cayley/graph/mongo"
 	_ "github.com/google/cayley/graph/postgres"
 
+<<<<<<< HEAD
 	// Load writer registry
 	_ "github.com/google/cayley/writer"
 
+=======
+>>>>>>> a9904202633dc8a1aae3ce33ea89a5c4afb3e9df
 )
 
 var (

@@ -35,11 +35,9 @@ type NodeIterator struct {
 	qs   *QuadStore
 	size int64
 	dir  quad.Direction
-
 	sqlQuery   string
 	sqlWhere   string
 	cursorName string
-
 	resultCache []NodeValue
 	cacheIndex  int
 }
