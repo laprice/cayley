@@ -148,7 +148,7 @@ func (it *Optional) Stats() graph.IteratorStats {
 	}
 }
 
-// If you're empty and you know it, clap your hands.
-func (it *Optional) Size() (int64, bool) {
-	return 0, true
+func (it *Optional) SubIterators() []graph.Iterator {
+	return []graph.Iterator{it.subIt}
+
 }

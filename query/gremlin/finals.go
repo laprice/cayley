@@ -145,8 +145,18 @@ func (wk *worker) tagsToValueMap(m map[string]graph.Value) map[string]string {
 
 func (wk *worker) runIteratorToArray(it graph.Iterator, limit int) []map[string]string {
 	output := make([]map[string]string, 0)
-	n := 0
-	it, _ = it.Optimize()
+	count := 0
+	newIt, changed := it.Optimize()
+	if changed {
+		it.Close()
+		it = newIt
+	}
+	newIt, changed = ses.ts.OptimizeIterator(it)
+	if changed {
+		it.Close()
+		it = newIt
+	}
+
 	for {
 		select {
 		case <-wk.kill:
@@ -184,8 +194,19 @@ func (wk *worker) runIteratorToArray(it graph.Iterator, limit int) []map[string]
 
 func (wk *worker) runIteratorToArrayNoTags(it graph.Iterator, limit int) []string {
 	output := make([]string, 0)
-	n := 0
-	it, _ = it.Optimize()
+
+	count := 0
+	newIt, changed := it.Optimize()
+	if changed {
+		it.Close()
+		it = newIt
+	}
+	newIt, changed = ses.ts.OptimizeIterator(it)
+	if changed {
+		it.Close()
+		it = newIt
+	}
+
 	for {
 		select {
 		case <-wk.kill:
@@ -205,16 +226,17 @@ func (wk *worker) runIteratorToArrayNoTags(it graph.Iterator, limit int) []strin
 	return output
 }
 
-func (wk *worker) runIteratorWithCallback(it graph.Iterator, callback otto.Value, this otto.FunctionCall, limit int) {
-	n := 0
-	it, _ = it.Optimize()
-	if glog.V(2) {
-		b, err := json.MarshalIndent(it.Describe(), "", "  ")
-		if err != nil {
-			glog.V(2).Infof("failed to format description: %v", err)
-		} else {
-			glog.V(2).Infof("%s", b)
-		}
+func runIteratorWithCallback(it graph.Iterator, ses *Session, callback otto.Value, this otto.FunctionCall, limit int) {
+	count := 0
+	newIt, changed := it.Optimize()
+	if changed {
+		it.Close()
+		it = newIt
+	}
+	newIt, changed = ses.ts.OptimizeIterator(it)
+	if changed {
+		it.Close()
+		it = newIt
 	}
 	for {
 		select {

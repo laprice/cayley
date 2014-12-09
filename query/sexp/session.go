@@ -71,6 +71,12 @@ func (s *Session) ExecInput(input string, out chan interface{}, limit int) {
 	it := BuildIteratorTreeForQuery(s.qs, input)
 	newIt, changed := it.Optimize()
 	if changed {
+		it.Close()
+		it = newIt
+	}
+	newIt, changed = s.ts.OptimizeIterator(it)
+	if changed {
+		it.Close()
 		it = newIt
 	}
 
@@ -102,6 +108,7 @@ func (s *Session) ExecInput(input string, out chan interface{}, limit int) {
 		}
 	}
 	close(out)
+	it.Close()
 }
 
 func (s *Session) ToText(result interface{}) string {

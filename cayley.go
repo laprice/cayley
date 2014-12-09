@@ -46,9 +46,8 @@ import (
 	_ "github.com/google/cayley/graph/leveldb"
 	_ "github.com/google/cayley/graph/memstore"
 	_ "github.com/google/cayley/graph/mongo"
+	_ "github.com/google/cayley/graph/postgres"
 
-	// Load writer registry
-	_ "github.com/google/cayley/writer"
 )
 
 var (
