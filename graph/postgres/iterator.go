@@ -151,8 +151,7 @@ func (it *Iterator) Clone() graph.Iterator {
 	return newM
 }
 
-func (it *Iterator) Next() (graph.Value, bool) {
-	graph.NextLogIn(it)
+func (it *Iterator) Next() (bool) {
 	if it.tx == nil {
 		if err := it.beginTx(); err != nil {
 			glog.Fatalln("error beginning in Next() - ", err.Error())
@@ -162,12 +161,13 @@ func (it *Iterator) Next() (graph.Value, bool) {
 	var nullProv sql.NullInt64
 	var qv QuadValue
 	r := it.tx.QueryRowx("FETCH NEXT FROM " + it.cursorName + ";")
-	if err := r.Scan(&qv[0], &qv[1], &qv[2], &qv[3], &nullProv); err != nil {
+	if err := r.Scan(&qv[0], &qv[1], &qv[2], &qv[3], &nullProv)
+ err != nil {
 		if err != sql.ErrNoRows {
 			glog.Errorln("Error Nexting Iterator: ", err)
 		}
 		it.Close()
-		return graph.NextLogOut(it, qv, false)
+		return false
 	}
 	if nullProv.Valid {
 		nv, _ := nullProv.Value()
@@ -175,14 +175,12 @@ func (it *Iterator) Next() (graph.Value, bool) {
 	} else {
 		qv[4] = int64(-1)
 	}
-	it.Last = qv
-	return graph.NextLogOut(it, qv, true)
+	return true
 }
 
 func (it *Iterator) Contains(v graph.Value) bool {
 	graph.ContainsLogIn(it, v)
 	if it.dir == quad.Any {
-		it.Last = v
 		return graph.ContainsLogOut(it, v, true)
 	}
 	if it.tx == nil {
@@ -199,7 +197,6 @@ func (it *Iterator) Contains(v graph.Value) bool {
 		glog.Fatalln(err.Error())
 	}
 	if hit > 0 {
-		it.Last = v
 		return graph.ContainsLogOut(it, v, true)
 	}
 	return graph.ContainsLogOut(it, v, false)

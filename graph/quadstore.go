@@ -23,9 +23,8 @@ package graph
 
 import (
 	"errors"
-
-	"github.com/barakmich/glog"
 	"github.com/google/cayley/quad"
+	"github.com/barakmich/glog"
 )
 
 // Value defines an opaque "quad store value" type. However the backend wishes
