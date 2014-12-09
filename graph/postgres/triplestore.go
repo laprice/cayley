@@ -18,18 +18,19 @@ import (
 	"database/sql"
 	"github.com/google/cayley/graph"
 	"github.com/google/cayley/graph/iterator"
+	"github.com/google/cayley/quad"
 	"github.com/jmoiron/sqlx"
 	_ "github.com/lib/pq"
 
 	"github.com/barakmich/glog"
 )
 
-type TripleStore struct {
+type QuadStore struct {
 	db      *sqlx.DB
 	idCache *IDLru
 }
 
-type TripleValue [5]int64
+type QuadValue [5]int64
 type NodeValue int64
 
 const pgSchema = `
@@ -39,7 +40,7 @@ CREATE TABLE nodes (
 	name varchar not null
 );
 
-CREATE TABLE triples (
+CREATE TABLE quads (
 	id   bigserial primary key,
 	subj bigint references nodes(id),
 	obj  bigint references nodes(id),
@@ -48,36 +49,36 @@ CREATE TABLE triples (
 );
 
 CREATE INDEX node_name_idx ON nodes(name);
-CREATE INDEX triple_search_idx ON triples(subj, obj, pred, prov);
-CREATE INDEX triple_subj_idx ON triples(subj);
-CREATE INDEX triple_pred_idx ON triples(pred);
-CREATE INDEX triple_obj_idx ON triples(obj);
-CREATE INDEX triple_prov_idx ON triples(prov);
+CREATE INDEX quad_search_idx ON quads(subj, obj, pred, prov);
+CREATE INDEX quad_subj_idx ON quads(subj);
+CREATE INDEX quad_pred_idx ON quads(pred);
+CREATE INDEX quad_obj_idx ON quads(obj);
+CREATE INDEX quad_prov_idx ON quads(prov);
 `
 
 func createNewPostgresGraph(addr string, options graph.Options) error {
-	t, err := newTripleStore(addr, options)
+	t, err := newQuadStore(addr, options)
 	if err == nil {
 		defer t.Close()
-		_, err = t.(*TripleStore).db.Exec(pgSchema)
+		_, err = t.(*QuadStore).db.Exec(pgSchema)
 	}
 	return err
 }
 
 // addr = "user=username dbname=dbname"
-func newTripleStore(addr string, options graph.Options) (graph.TripleStore, error) {
+func newQuadStore(addr string, options graph.Options) (graph.QuadStore, error) {
 	db, err := sqlx.Connect("postgres", addr+" sslmode=disable")
 	if err != nil {
 		return nil, err
 	}
 
-	return &TripleStore{
+	return &QuadStore{
 		db:      db,
 		idCache: NewIDLru(1 << 16),
 	}, nil
 }
 
-func (t *TripleStore) getOrCreateNode(name string) int64 {
+func (t *QuadStore) getOrCreateNode(name string) int64 {
 	val, ok := t.idCache.RevGet(name)
 	if ok {
 		return val
@@ -101,51 +102,51 @@ func (t *TripleStore) getOrCreateNode(name string) int64 {
 	return val
 }
 
-// Add a triple to the store.
-func (t *TripleStore) AddTriple(x *graph.Triple) {
+// Add a quad to the store.
+func (t *QuadStore) AddQuad(x *graph.Quad) {
 	sid := t.getOrCreateNode(x.Subject)
 	pid := t.getOrCreateNode(x.Predicate)
 	oid := t.getOrCreateNode(x.Object)
 	if x.Provenance != "" {
 		cid := t.getOrCreateNode(x.Provenance)
-		t.db.MustExec(`INSERT INTO triples (subj, pred, obj, prov) VALUES ($1,$2,$3,$4);`, sid, pid, oid, cid)
+		t.db.MustExec(`INSERT INTO quads (subj, pred, obj, prov) VALUES ($1,$2,$3,$4);`, sid, pid, oid, cid)
 	} else {
-		t.db.MustExec(`INSERT INTO triples (subj, pred, obj, prov) VALUES ($1,$2,$3,NULL);`, sid, pid, oid)
+		t.db.MustExec(`INSERT INTO quads (subj, pred, obj, prov) VALUES ($1,$2,$3,NULL);`, sid, pid, oid)
 	}
 }
 
-// Add a set of triples to the store, atomically if possible.
-func (t *TripleStore) AddTripleSet(xset []*graph.Triple) {
+// Add a set of quads to the store, atomically if possible.
+func (t *QuadStore) AddQuadSet(xset []*graph.Quad) {
 	t.db.MustExec("BEGIN; SET CONSTRAINTS ALL DEFERRED;")
 	// TODO: multi-INSERT or COPY FROM
 	for _, x := range xset {
-		t.AddTriple(x)
+		t.AddQuad(x)
 	}
 	t.db.MustExec("COMMIT;")
 }
 
-// Removes a triple matching the given one  from the database,
+// Removes a quad matching the given one  from the database,
 // if it exists. Does nothing otherwise.
-func (t *TripleStore) RemoveTriple(x *graph.Triple) {
+func (t *QuadStore) RemoveQuad(x *graph.Quad) {
 	if x.Provenance != "" {
-		t.db.MustExec(`DELETE FROM triples USING nodes s, nodes p, nodes o, nodes c
+		t.db.MustExec(`DELETE FROM quads USING nodes s, nodes p, nodes o, nodes c
 		WHERE s.name=$1::text AND p.name=$2::text AND o.name=$3::text AND c.name=$4::text
 		AND subj=s.id AND obj=o.id AND pred=p.id AND prov=c.id;`,
 			x.Subject, x.Predicate, x.Object, x.Provenance)
 	} else {
-		t.db.MustExec(`DELETE FROM triples USING nodes s, nodes p, nodes o
+		t.db.MustExec(`DELETE FROM quads USING nodes s, nodes p, nodes o
 		WHERE s.name=$1::text AND p.name=$2::text AND o.name=$3::text
 		AND subj=s.id AND obj=o.id AND pred=p.id AND prov IS NULL;`,
 			x.Subject, x.Predicate, x.Object)
 	}
 }
 
-// Given an opaque token, returns the triple for that token from the store.
-func (t *TripleStore) Triple(tid graph.Value) (tr *graph.Triple) {
+// Given an opaque token, returns the quad for that token from the store.
+func (t *QuadStore) Quad(tid graph.Value) (tr *graph.Quad) {
 	ok := false
 	gotAll := true
-	tr = &graph.Triple{}
-	trv := tid.(TripleValue)
+	tr = &graph.Quad{}
+	trv := tid.(QuadValue)
 
 	tr.Subject, ok = t.idCache.Get(trv[1])
 	gotAll = gotAll && ok
@@ -158,7 +159,7 @@ func (t *TripleStore) Triple(tid graph.Value) (tr *graph.Triple) {
 		gotAll = gotAll && ok
 		if !gotAll {
 			r := t.db.QueryRowx(`SELECT s.name, p.name, o.name, c.name
-				FROM triples t, nodes s, nodes p, nodes o, nodes c
+				FROM quads t, nodes s, nodes p, nodes o, nodes c
 				WHERE t.id=$1 AND t.subj=s.id AND t.pred=p.id AND t.obj=o.id AND t.prov=c.id;`, trv[0])
 			err := r.Scan(&tr.Subject, &tr.Predicate, &tr.Object, &tr.Provenance)
 			if err != nil {
@@ -173,7 +174,7 @@ func (t *TripleStore) Triple(tid graph.Value) (tr *graph.Triple) {
 		tr.Provenance = ""
 		if !gotAll {
 			r := t.db.QueryRowx(`SELECT s.name, p.name, o.name
-				FROM triples t, nodes s, nodes p, nodes o
+				FROM quads t, nodes s, nodes p, nodes o
 				WHERE t.id=$1 AND t.subj=s.id AND t.pred=p.id AND t.obj=o.id;`, trv[0])
 			err := r.Scan(&tr.Subject, &tr.Predicate, &tr.Object)
 			if err != nil {
@@ -190,8 +191,8 @@ func (t *TripleStore) Triple(tid graph.Value) (tr *graph.Triple) {
 
 // Given a direction and a token, creates an iterator of links which have
 // that node token in that directional field.
-func (ts *TripleStore) TripleIterator(dir graph.Direction, val graph.Value) graph.Iterator {
-	it := NewTripleIterator(ts, dir, val)
+func (ts *QuadStore) QuadIterator(dir graph.Direction, val graph.Value) graph.Iterator {
+	it := NewQuadIterator(ts, dir, val)
 	if it.size == 0 {
 		it.Close()
 		return iterator.NewNull()
@@ -200,16 +201,16 @@ func (ts *TripleStore) TripleIterator(dir graph.Direction, val graph.Value) grap
 }
 
 // Returns an iterator enumerating all nodes in the graph.
-func (ts *TripleStore) NodesAllIterator() graph.Iterator {
+func (ts *QuadStore) NodesAllIterator() graph.Iterator {
 	return NewNodeIterator(ts)
 }
 
 // Returns an iterator enumerating all links in the graph.
-func (ts *TripleStore) TriplesAllIterator() graph.Iterator {
+func (ts *QuadStore) QuadsAllIterator() graph.Iterator {
 	return NewAllIterator(ts)
 }
 
-func (t *TripleStore) FixedIterator() graph.FixedIterator {
+func (t *QuadStore) FixedIterator() graph.FixedIterator {
 	return iterator.NewFixedIteratorWithCompare(func(a, b graph.Value) bool {
 		switch v := a.(type) {
 		case NodeValue:
@@ -218,17 +219,17 @@ func (t *TripleStore) FixedIterator() graph.FixedIterator {
 			}
 			return v == NodeValue(b.(int64))
 
-		case TripleValue:
-			w := b.(TripleValue)
+		case QuadValue:
+			w := b.(QuadValue)
 			return v[0] == w[0] && v[1] == w[1] && v[2] == w[2] && v[3] == w[3] && v[4] == w[4]
 		}
 		return false
 	})
 }
 
-// Given a node ID, return the opaque token used by the TripleStore
+// Given a node ID, return the opaque token used by the QuadStore
 // to represent that id.
-func (t *TripleStore) ValueOf(name string) graph.Value {
+func (t *QuadStore) ValueOf(name string) graph.Value {
 	res, ok := t.idCache.RevGet(name)
 	if ok {
 		return NodeValue(res)
@@ -247,7 +248,7 @@ func (t *TripleStore) ValueOf(name string) graph.Value {
 }
 
 // Given an opaque token, return the node that it represents.
-func (t *TripleStore) NameOf(oid graph.Value) (res string) {
+func (t *QuadStore) NameOf(oid graph.Value) (res string) {
 	var nid int64
 	switch v := oid.(type) {
 	case int64:
@@ -273,9 +274,9 @@ func (t *TripleStore) NameOf(oid graph.Value) (res string) {
 	return
 }
 
-// Returns the number of triples currently stored.
-func (t *TripleStore) Size() (res int64) {
-	r := t.db.QueryRowx("SELECT COUNT(*) FROM triples;")
+// Returns the number of quads currently stored.
+func (t *QuadStore) Size() (res int64) {
+	r := t.db.QueryRowx("SELECT COUNT(*) FROM quads;")
 	err := r.Scan(&res)
 	if err != nil {
 		glog.Fatalln(err.Error())
@@ -283,29 +284,29 @@ func (t *TripleStore) Size() (res int64) {
 	return
 }
 
-// Close the triple store and clean up. (Flush to disk, cleanly
+// Close the quad store and clean up. (Flush to disk, cleanly
 // sever connections, etc)
-func (t *TripleStore) Close() {
+func (t *QuadStore) Close() {
 	t.db.Close()
 }
 
-// Convienence function for speed. Given a triple token and a direction
-// return the node token for that direction. Sometimes, a TripleStore
+// Convienence function for speed. Given a quad token and a direction
+// return the node token for that direction. Sometimes, a QuadStore
 // can do this without going all the way to the backing store, and
-// gives the TripleStore the opportunity to make this optimization.
-func (t *TripleStore) TripleDirection(triple_id graph.Value, dir graph.Direction) graph.Value {
-	trv := triple_id.(TripleValue)
+// gives the QuadStore the opportunity to make this optimization.
+func (t *QuadStore) QuadDirection(quad_id graph.Value, dir graph.Direction) graph.Value {
+	qv := quad_id.(QuadValue)
 	switch dir {
 	case graph.Subject:
-		return trv[1]
+		return qv[1]
 	case graph.Predicate:
-		return trv[2]
+		return qv[2]
 	case graph.Object:
-		return trv[3]
+		return qv[3]
 	case graph.Provenance:
-		return trv[4]
+		return qv[4]
 	}
-	return trv[0]
+	return qv[0]
 }
 
 var postgresType graph.Type
@@ -317,7 +318,7 @@ func init() {
 	postgresAllType = graph.RegisterIterator("postgres-all-nodes")
 	postgresNodeType = graph.RegisterIterator("postgres-nodes")
 
-	graph.RegisterTripleStore("postgres", newTripleStore, createNewPostgresGraph)
+	graph.RegisterQuadStore("postgres", newQuadStore, createNewPostgresGraph)
 }
 
 func dirToSchema(dir graph.Direction) string {
