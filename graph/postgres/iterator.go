@@ -20,7 +20,6 @@ import (
 	"github.com/barakmich/glog"
 	"github.com/jmoiron/sqlx"
 	"strings"
-
 	"code.google.com/p/go-uuid/uuid"
 	"github.com/google/cayley/graph"
 	"github.com/google/cayley/graph/iterator"
