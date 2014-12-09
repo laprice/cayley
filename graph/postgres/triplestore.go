@@ -290,6 +290,15 @@ func (q *QuadStore) Close() {
 	q.db.Close()
 }
 
+// @@TODO These functions must be implemented to match the interface described in 
+// github.com/google/cayley/graph/quadstore.go
+
+// @@TODO
+//func ApplyDeltas([]Delta) error
+
+// @@TODO
+//func Horizon() int64
+
 // Convenience function for speed. Given a quad token and a direction
 // return the node token for that direction. Sometimes, a QuadStore
 // can do this without going all the way to the backing store, and
