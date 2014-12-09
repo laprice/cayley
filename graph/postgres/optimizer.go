@@ -6,8 +6,8 @@ import (
 	"strings"
 )
 
-func (ts *TripleStore) OptimizeIterator(it graph.Iterator) (graph.Iterator, bool) {
-	newIt, didChange := ts.recOptimizeIterator(it)
+func (qs *QuadStore) OptimizeIterator(it graph.Iterator) (graph.Iterator, bool) {
+	newIt, didChange := qs.recOptimizeIterator(it)
 	if didChange {
 		newIt.CopyTagsFrom(it)
 		it.Close()
@@ -16,14 +16,14 @@ func (ts *TripleStore) OptimizeIterator(it graph.Iterator) (graph.Iterator, bool
 	return it, false
 }
 
-func (ts *TripleStore) recOptimizeIterator(it graph.Iterator) (graph.Iterator, bool) {
+func (qs *QuadStore) recOptimizeIterator(it graph.Iterator) (graph.Iterator, bool) {
 	switch it.Type() {
 	case graph.And:
 
-		newIt, ok := ts.optimizeAnd(it.(*iterator.And))
+		newIt, ok := qs.optimizeAnd(it.(*iterator.And))
 		if ok {
 			for ok && newIt.Type() == graph.And {
-				newIt, ok = ts.optimizeAnd(newIt.(*iterator.And))
+				newIt, ok = qs.optimizeAnd(newIt.(*iterator.And))
 			}
 			return newIt, true
 		}
@@ -33,17 +33,17 @@ func (ts *TripleStore) recOptimizeIterator(it graph.Iterator) (graph.Iterator, b
 		hasa := it.(*iterator.HasA)
 		l2 := hasa.SubIterators()
 
-		newSub, changed := ts.recOptimizeIterator(l2[0])
+		newSub, changed := qs.recOptimizeIterator(l2[0])
 		if changed {
 			l2[0] = newSub
 		}
 		newSub = l2[0]
 		if newSub.Type() == postgresType {
-			newNodeIt := NewNodeIteratorWhere(ts, hasa.Direction(), newSub.(*TripleIterator).sqlClause())
+			newNodeIt := NewNodeIteratorWhere(qs, hasa.Direction(), newSub.(*QuadIterator).sqlClause())
 			return newNodeIt, true
 		}
 		if changed {
-			newIt := iterator.NewHasA(ts, newSub, hasa.Direction())
+			newIt := iterator.NewHasA(qs, newSub, hasa.Direction())
 			return newIt, true
 		}
 		return it, false
@@ -60,7 +60,7 @@ func (ts *TripleStore) recOptimizeIterator(it graph.Iterator) (graph.Iterator, b
 		// linksto all nodes? sure...
 		if sublink.Type() == postgresAllType {
 			linksTo.Close()
-			return ts.TriplesAllIterator(), true
+			return qs.QuadsAllIterator(), true
 		}
 
 		if sublink.Type() == graph.Fixed {
@@ -70,7 +70,7 @@ func (ts *TripleStore) recOptimizeIterator(it graph.Iterator) (graph.Iterator, b
 				if !ok {
 					panic("Sizes lie")
 				}
-				newIt := ts.TripleIterator(linksTo.Direction(), val)
+				newIt := qs.QuadIterator(linksTo.Direction(), val)
 				for _, tag := range sublink.Tags() {
 					newIt.AddFixedTag(tag, val)
 				}
@@ -80,24 +80,24 @@ func (ts *TripleStore) recOptimizeIterator(it graph.Iterator) (graph.Iterator, b
 			return it, false
 		}
 
-		newIt, ok := ts.recOptimizeIterator(sublink)
+		newIt, ok := qs.recOptimizeIterator(sublink)
 		if ok {
 			pgIter, isPgIter := newIt.(*NodeIterator)
 			if isPgIter && pgIter.dir != graph.Any {
 				// SELECT * FROM triples WHERE <linksto.direction> IN (SELECT <pgIter.dir> FROM triples WHERE <pgIter.sqlWhere>)
 				newWhere := dirToSchema(linksTo.Direction()) + " IN ("
 				newWhere += pgIter.sqlQuery + ")"
-				return NewTripleIteratorWhere(ts, newWhere), true
+				return NewQuadIteratorWhere(qs, newWhere), true
 			}
 
-			return iterator.NewLinksTo(ts, newIt, linksTo.Direction()), true
+			return iterator.NewLinksTo(qs, newIt, linksTo.Direction()), true
 		}
 	}
 	return it, false
 }
 
 // If we're ANDing multiple postgres iterators, do it in postgres and use the indexes
-func (ts *TripleStore) optimizeAnd(and *iterator.And) (graph.Iterator, bool) {
+func (qs *QuadStore) optimizeAnd(and *iterator.And) (graph.Iterator, bool) {
 	allPostgres := true
 	types := 0
 	nDir := graph.Any
@@ -110,7 +110,7 @@ func (ts *TripleStore) optimizeAnd(and *iterator.And) (graph.Iterator, bool) {
 		}
 		if it.Type() == postgresType {
 			types |= 1
-			pit := it.(*TripleIterator)
+			pit := it.(*QuadIterator)
 			subQueries = append(subQueries, pit.sqlClause())
 			continue
 		}
@@ -136,17 +136,17 @@ func (ts *TripleStore) optimizeAnd(and *iterator.And) (graph.Iterator, bool) {
 
 	if allPostgres {
 		if types == 1 {
-			return NewTripleIteratorWhere(ts, strings.Join(subQueries, " AND ")), true
+			return NewQuadIteratorWhere(qs, strings.Join(subQueries, " AND ")), true
 		}
 		if types == 2 {
-			return NewNodeIteratorWhere(ts, nDir, strings.Join(subQueries, " AND ")), true
+			return NewNodeIteratorWhere(qs, nDir, strings.Join(subQueries, " AND ")), true
 		}
 	}
 
 	newIts := make([]graph.Iterator, len(subits))
 	didChange := false
 	for i, sub := range subits {
-		it, changed := ts.recOptimizeIterator(sub)
+		it, changed := qs.recOptimizeIterator(sub)
 		if changed {
 			didChange = true
 			newIts[i] = it
