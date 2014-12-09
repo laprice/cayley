@@ -145,8 +145,17 @@ func (wk *worker) tagsToValueMap(m map[string]graph.Value) map[string]string {
 
 func (wk *worker) runIteratorToArray(it graph.Iterator, limit int) []map[string]string {
 	output := make([]map[string]string, 0)
-	n := 0
-	it, _ = it.Optimize()
+	count := 0
+	newIt, changed := it.Optimize()
+	if changed {
+		it.Close()
+		it = newIt
+	}
+	newIt, changed = ses.ts.OptimizeIterator(it)
+	if changed {
+		it.Close()
+		it = newIt
+	}
 	for {
 		select {
 		case <-wk.kill:
@@ -184,8 +193,22 @@ func (wk *worker) runIteratorToArray(it graph.Iterator, limit int) []map[string]
 
 func (wk *worker) runIteratorToArrayNoTags(it graph.Iterator, limit int) []string {
 	output := make([]string, 0)
+<<<<<<< HEAD
 	n := 0
 	it, _ = it.Optimize()
+=======
+	count := 0
+	newIt, changed := it.Optimize()
+	if changed {
+		it.Close()
+		it = newIt
+	}
+	newIt, changed = ses.ts.OptimizeIterator(it)
+	if changed {
+		it.Close()
+		it = newIt
+	}
+>>>>>>> Give TripleStore a chance to optimize Iterators
 	for {
 		select {
 		case <-wk.kill:
@@ -205,6 +228,7 @@ func (wk *worker) runIteratorToArrayNoTags(it graph.Iterator, limit int) []strin
 	return output
 }
 
+<<<<<<< HEAD
 func (wk *worker) runIteratorWithCallback(it graph.Iterator, callback otto.Value, this otto.FunctionCall, limit int) {
 	n := 0
 	it, _ = it.Optimize()
@@ -215,6 +239,19 @@ func (wk *worker) runIteratorWithCallback(it graph.Iterator, callback otto.Value
 		} else {
 			glog.V(2).Infof("%s", b)
 		}
+=======
+func runIteratorWithCallback(it graph.Iterator, ses *Session, callback otto.Value, this otto.FunctionCall, limit int) {
+	count := 0
+	newIt, changed := it.Optimize()
+	if changed {
+		it.Close()
+		it = newIt
+	}
+	newIt, changed = ses.ts.OptimizeIterator(it)
+	if changed {
+		it.Close()
+		it = newIt
+>>>>>>> Give TripleStore a chance to optimize Iterators
 	}
 	for {
 		select {
@@ -277,6 +314,7 @@ func (wk *worker) runIterator(it graph.Iterator) {
 		iterator.OutputQueryShapeForIterator(it, wk.qs, wk.shape)
 		return
 	}
+<<<<<<< HEAD
 	it, _ = it.Optimize()
 	if glog.V(2) {
 		b, err := json.MarshalIndent(it.Describe(), "", "  ")
@@ -286,6 +324,19 @@ func (wk *worker) runIterator(it graph.Iterator) {
 			glog.Infof("%s", b)
 		}
 	}
+=======
+	newIt, changed := it.Optimize()
+	if changed {
+		it.Close()
+		it = newIt
+	}
+	newIt, changed = ses.ts.OptimizeIterator(it)
+	if changed {
+		it.Close()
+		it = newIt
+	}
+	glog.V(2).Infoln(it.DebugString(0))
+>>>>>>> Give TripleStore a chance to optimize Iterators
 	for {
 		select {
 		case <-wk.kill:
