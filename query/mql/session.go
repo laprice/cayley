@@ -83,16 +83,6 @@ func (s *Session) ExecInput(input string, c chan interface{}, _ int) {
 	if s.currentQuery.isError() {
 		return
 	}
-	newIt, changed := s.currentQuery.it.Optimize()
-	if changed {
-		s.currentQuery.it.Close()
-		s.currentQuery.it = newIt
-	}
-	newIt, changed = s.ts.OptimizeIterator(s.currentQuery.it)
-	if changed {
-		s.currentQuery.it.Close()
-		s.currentQuery.it = newIt
-	}
 	it := s.currentQuery.it
 
 	if glog.V(2) {
