@@ -145,7 +145,7 @@ func (wk *worker) tagsToValueMap(m map[string]graph.Value) map[string]string {
 
 func (wk *worker) runIteratorToArray(it graph.Iterator, limit int) []map[string]string {
 	output := make([]map[string]string, 0)
-	count := 0
+	n := 0
 	newIt, changed := it.Optimize()
 	if changed {
 		it.Close()
