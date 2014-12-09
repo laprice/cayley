@@ -74,12 +74,6 @@ func (s *Session) ExecInput(input string, out chan interface{}, limit int) {
 		it.Close()
 		it = newIt
 	}
-	newIt, changed = s.ts.OptimizeIterator(it)
-	if changed {
-		it.Close()
-		it = newIt
-	}
-
 	if s.debug {
 		b, err := json.MarshalIndent(it.Describe(), "", "  ")
 		if err != nil {
