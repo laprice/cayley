@@ -151,11 +151,6 @@ func (wk *worker) runIteratorToArray(it graph.Iterator, limit int) []map[string]
 		it.Close()
 		it = newIt
 	}
-	newIt, changed = ses.ts.OptimizeIterator(it)
-	if changed {
-		it.Close()
-		it = newIt
-	}
 	for {
 		select {
 		case <-wk.kill:
