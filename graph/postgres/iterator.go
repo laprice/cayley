@@ -23,22 +23,23 @@ import (
 	"code.google.com/p/go-uuid/uuid"
 	"github.com/google/cayley/graph"
 	"github.com/google/cayley/graph/iterator"
+	"github.com/google/cayley/quad"
 )
 
-type TripleIterator struct {
-	iterator.Base
-	tx   *sqlx.Tx
-	ts   *TripleStore
-	dir  graph.Direction
-	val  NodeValue
-	size int64
-
+type QuadIterator struct {
+	uid   uint64
+	tags  graph.Tagger
+	tx    *sqlx.Tx
+	qs    *QuadStore
+	dir   quad.Direction
+	val   NodeValue
+	size  int64
 	sqlQuery   string
 	sqlWhere   string
 	cursorName string
 }
 
-func (it *TripleIterator) sqlClause() string {
+func (it *QuadIterator) sqlClause() string {
 	if it.sqlWhere != "" {
 		return it.sqlWhere
 	}
@@ -46,15 +47,15 @@ func (it *TripleIterator) sqlClause() string {
 	return fmt.Sprintf("%s=%d", dirToSchema(it.dir), int64(it.val))
 }
 
-func NewTripleIterator(ts *TripleStore, dir graph.Direction, val graph.Value) *TripleIterator {
-	var m TripleIterator
+func NewQuadIterator(qs *QuadStore, dir graph.Direction, val graph.Value) *QuadIterator {
+	var m QuadIterator
 	iterator.BaseInit(&m.Base)
 
 	m.cursorName = "j" + strings.Replace(uuid.NewRandom().String(), "-", "", -1)
 	m.sqlQuery = "SELECT id, subj, pred, obj, prov FROM triples"
 	var err error
 	m.tx = nil
-	m.ts = ts
+	m.qs = qs
 
 	m.dir = dir
 	if dir != graph.Any {
@@ -66,7 +67,7 @@ func NewTripleIterator(ts *TripleStore, dir graph.Direction, val graph.Value) *T
 			m.val = NodeValue(v2)
 		}
 		where := fmt.Sprintf(" WHERE %s=$1", dirToSchema(dir))
-		r := ts.db.QueryRowx("SELECT COUNT(*) FROM triples"+where, m.val)
+		r := qs.db.QueryRowx("SELECT COUNT(*) FROM triples"+where, m.val)
 		err = r.Scan(&m.size)
 		if err != nil {
 			glog.Fatalln(err.Error())
@@ -75,7 +76,7 @@ func NewTripleIterator(ts *TripleStore, dir graph.Direction, val graph.Value) *T
 		m.sqlQuery += where
 
 	} else {
-		r := ts.db.QueryRowx("SELECT COUNT(*) FROM triples;")
+		r := qs.db.QueryRowx("SELECT COUNT(*) FROM triples;")
 		err = r.Scan(&m.size)
 		if err != nil {
 			glog.Fatalln(err.Error())
@@ -86,9 +87,9 @@ func NewTripleIterator(ts *TripleStore, dir graph.Direction, val graph.Value) *T
 	return &m
 }
 
-func (it *TripleIterator) beginTx() error {
+func (it *QuadIterator) beginTx() error {
 	var err error
-	it.tx, err = it.ts.db.Beginx()
+	it.tx, err = it.qs.db.Beginx()
 	if err == nil {
 		if it.dir == graph.Any {
 			_, err = it.tx.Exec("DECLARE " + it.cursorName + " CURSOR FOR " + it.sqlQuery + ";")
@@ -99,21 +100,21 @@ func (it *TripleIterator) beginTx() error {
 	return err
 }
 
-func NewTripleIteratorWhere(ts *TripleStore, where string) *TripleIterator {
-	var m TripleIterator
+func NewQuadIteratorWhere(qs *QuadStore, where string) *QuadIterator {
+	var m QuadIterator
 	iterator.BaseInit(&m.Base)
 
 	m.cursorName = "j" + strings.Replace(uuid.NewRandom().String(), "-", "", -1)
 	m.sqlQuery = "SELECT id, subj, pred, obj, prov FROM triples WHERE "
 	var err error
 	m.tx = nil
-	m.ts = ts
+	m.qs = qs
 
 	m.sqlWhere = where
 	m.dir = graph.Any
 	m.val = NodeValue(0)
 
-	r := ts.db.QueryRowx("SELECT COUNT(*) FROM triples WHERE " + where)
+	r := qs.db.QueryRowx("SELECT COUNT(*) FROM triples WHERE " + where)
 	err = r.Scan(&m.size)
 	if err != nil {
 		glog.Fatalln("select count failed "+where, err.Error())
@@ -124,16 +125,16 @@ func NewTripleIteratorWhere(ts *TripleStore, where string) *TripleIterator {
 	return &m
 }
 
-func NewAllIterator(ts *TripleStore) *TripleIterator {
-	return NewTripleIterator(ts, graph.Any, nil)
+func NewAllIterator(qs *QuadStore) *QuadIterator {
+	return NewQuadIterator(qs, graph.Any, nil)
 }
 
-func (it *TripleIterator) Reset() {
+func (it *QuadIterator) Reset() {
 	// just Close, Next() will re-open
 	it.Close()
 }
 
-func (it *TripleIterator) Close() {
+func (it *QuadIterator) Close() {
 	if it.tx != nil {
 		it.tx.Exec("CLOSE " + it.cursorName + ";")
 		it.tx.Commit()
@@ -141,12 +142,12 @@ func (it *TripleIterator) Close() {
 	}
 }
 
-func (it *TripleIterator) Clone() graph.Iterator {
-	newM := &TripleIterator{}
+func (it *QuadIterator) Clone() graph.Iterator {
+	newM := &QuadIterator{}
 	iterator.BaseInit(&newM.Base)
 	newM.dir = it.dir
 	newM.val = it.val
-	newM.ts = it.ts
+	newM.qs = it.qs
 	newM.size = it.size
 	newM.sqlQuery = it.sqlQuery
 	newM.cursorName = "j" + strings.Replace(uuid.NewRandom().String(), "-", "", -1)
@@ -155,7 +156,7 @@ func (it *TripleIterator) Clone() graph.Iterator {
 	return newM
 }
 
-func (it *TripleIterator) Next() (graph.Value, bool) {
+func (it *QuadIterator) Next() (graph.Value, bool) {
 	graph.NextLogIn(it)
 	if it.tx == nil {
 		if err := it.beginTx(); err != nil {
@@ -164,7 +165,7 @@ func (it *TripleIterator) Next() (graph.Value, bool) {
 	}
 
 	var nullProv sql.NullInt64
-	var trv TripleValue
+	var trv QuadValue
 	r := it.tx.QueryRowx("FETCH NEXT FROM " + it.cursorName + ";")
 	if err := r.Scan(&trv[0], &trv[1], &trv[2], &trv[3], &nullProv); err != nil {
 		if err != sql.ErrNoRows {
@@ -183,7 +184,7 @@ func (it *TripleIterator) Next() (graph.Value, bool) {
 	return graph.NextLogOut(it, trv, true)
 }
 
-func (it *TripleIterator) Check(v graph.Value) bool {
+func (it *QuadIterator) Check(v graph.Value) bool {
 	graph.CheckLogIn(it, v)
 	if it.dir == graph.Any {
 		it.Last = v
@@ -195,7 +196,7 @@ func (it *TripleIterator) Check(v graph.Value) bool {
 		}
 	}
 
-	trv := v.(TripleValue)
+	trv := v.(QuadValue)
 	hit := 0
 	r := it.tx.QueryRowx("SELECT COUNT(*) FROM ("+it.sqlQuery+") x WHERE x.id=$2;", it.val, trv[0])
 	err := r.Scan(&hit)
@@ -209,20 +210,20 @@ func (it *TripleIterator) Check(v graph.Value) bool {
 	return graph.CheckLogOut(it, v, false)
 }
 
-func (it *TripleIterator) Size() (int64, bool) {
+func (it *QuadIterator) Size() (int64, bool) {
 	return it.size, true
 }
 
-func (it *TripleIterator) Type() graph.Type {
+func (it *QuadIterator) Type() graph.Type {
 	if it.sqlWhere == "" && it.dir == graph.Any {
 		return graph.All
 	}
 	return postgresType
 }
-func (it *TripleIterator) Sorted() bool                     { return false }
-func (it *TripleIterator) Optimize() (graph.Iterator, bool) { return it, false }
+func (it *QuadIterator) Sorted() bool                     { return false }
+func (it *QuadIterator) Optimize() (graph.Iterator, bool) { return it, false }
 
-func (it *TripleIterator) DebugString(indent int) string {
+func (it *QuadIterator) DebugString(indent int) string {
 	if it.sqlWhere != "" {
 		return fmt.Sprintf("%s(%s size:%d WHERE %s)", strings.Repeat(" ", indent), it.Type(), it.size,
 			it.sqlWhere)
@@ -231,10 +232,10 @@ func (it *TripleIterator) DebugString(indent int) string {
 		return fmt.Sprintf("%s(%s size:%d ALL)", strings.Repeat(" ", indent), it.Type(), it.size)
 	}
 	return fmt.Sprintf("%s(%s size:%d %s=%s)", strings.Repeat(" ", indent), it.Type(), it.size,
-		it.dir, it.ts.NameOf(it.val))
+		it.dir, it.qs.NameOf(it.val))
 }
 
-func (it *TripleIterator) GetStats() *graph.IteratorStats {
+func (it *QuadIterator) GetStats() *graph.IteratorStats {
 	size, _ := it.Size()
 	return &graph.IteratorStats{
 		CheckCost: 10,
