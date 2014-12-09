@@ -20,20 +20,21 @@ import (
 	"github.com/barakmich/glog"
 	"github.com/jmoiron/sqlx"
 	"strings"
-
 	"code.google.com/p/go-uuid/uuid"
 	"github.com/google/cayley/graph"
 	"github.com/google/cayley/graph/iterator"
+	"github.com/google/cayley/quad"
 )
 
 const maxNodeCacheSize = 150
 
 type NodeIterator struct {
-	iterator.Base
+	uid  uint64
+	tags graph.Tagger
 	tx   *sqlx.Tx
-	ts   *TripleStore
+	qs   *QuadStore
 	size int64
-	dir  graph.Direction
+	dir  quad.Direction
 
 	sqlQuery   string
 	sqlWhere   string
@@ -43,18 +44,18 @@ type NodeIterator struct {
 	cacheIndex  int
 }
 
-func NewNodeIterator(ts *TripleStore) *NodeIterator {
+func NewNodeIterator(qs *QuadStore) *NodeIterator {
 	var m NodeIterator
 	iterator.BaseInit(&m.Base)
 
 	m.sqlQuery = "SELECT id FROM nodes"
 	m.dir = graph.Any
 	m.tx = nil
-	m.ts = ts
+	m.qs = qs
 	m.cursorName = "j" + strings.Replace(uuid.NewRandom().String(), "-", "", -1)
 	m.cacheIndex = -1
 
-	r := ts.db.QueryRowx("SELECT COUNT(*) FROM nodes;")
+	r := qs.db.QueryRowx("SELECT COUNT(*) FROM nodes;")
 	err := r.Scan(&m.size)
 	if err != nil {
 		glog.Fatalln(err.Error())
@@ -64,7 +65,7 @@ func NewNodeIterator(ts *TripleStore) *NodeIterator {
 	return &m
 }
 
-func NewNodeIteratorWhere(ts *TripleStore, dir graph.Direction, where string) *NodeIterator {
+func NewNodeIteratorWhere(qs *QuadStore, dir quad.Direction, where string) *NodeIterator {
 	var m NodeIterator
 	iterator.BaseInit(&m.Base)
 
@@ -72,11 +73,11 @@ func NewNodeIteratorWhere(ts *TripleStore, dir graph.Direction, where string) *N
 	m.sqlWhere = where
 	m.sqlQuery = "SELECT " + dirToSchema(m.dir) + " FROM triples WHERE " + m.sqlWhere
 	m.tx = nil
-	m.ts = ts
+	m.qs = qs
 	m.cursorName = "j" + strings.Replace(uuid.NewRandom().String(), "-", "", -1)
 	m.cacheIndex = -1
 
-	r := ts.db.QueryRowx("SELECT COUNT(*) FROM nodes WHERE id IN (" + m.sqlQuery + ")")
+	r := qs.db.QueryRowx("SELECT COUNT(*) FROM nodes WHERE id IN (" + m.sqlQuery + ")")
 	err := r.Scan(&m.size)
 	if err != nil {
 		glog.Fatalln(err.Error())
@@ -88,7 +89,7 @@ func NewNodeIteratorWhere(ts *TripleStore, dir graph.Direction, where string) *N
 
 func (it *NodeIterator) beginTx() error {
 	var err error
-	it.tx, err = it.ts.db.Beginx()
+	it.tx, err = it.qs.db.Beginx()
 	if err == nil {
 		_, err = it.tx.Exec("DECLARE " + it.cursorName + " CURSOR FOR " + it.sqlQuery + ";")
 	}
@@ -112,7 +113,7 @@ func (it *NodeIterator) Close() {
 func (it *NodeIterator) Clone() graph.Iterator {
 	newM := &NodeIterator{}
 	iterator.BaseInit(&newM.Base)
-	newM.ts = it.ts
+	newM.qs = it.qs
 	newM.size = it.size
 	newM.sqlQuery = it.sqlQuery
 	newM.sqlWhere = it.sqlWhere
@@ -167,7 +168,7 @@ func (it *NodeIterator) Check(v graph.Value) bool {
 		// un-cachable triple-based query
 		var res int
 		SQL := "SELECT 1 FROM triples WHERE " + dirToSchema(it.dir) + "=$1::bigint AND " + it.sqlWhere
-		row := it.ts.db.QueryRowx(SQL, v)
+		row := it.qs.db.QueryRowx(SQL, v)
 		err := row.Scan(&res)
 		if err != nil {
 			panic(err)
