@@ -22,7 +22,6 @@ import (
 	"strings"
 	"code.google.com/p/go-uuid/uuid"
 	"github.com/google/cayley/graph"
-	"github.com/google/cayley/graph/iterator"
 	"github.com/google/cayley/quad"
 )
 
@@ -47,10 +46,8 @@ func (it *Iterator) sqlClause() string {
 	return fmt.Sprintf("%s=%d", dirToSchema(it.dir), int64(it.val))
 }
 
-func NewIterator(qs *QuadStore, dir graph.Direction, val graph.Value) *Iterator {
+func NewIterator(qs *QuadStore, dir quad.Direction, val graph.Value) *Iterator {
 	var m Iterator
-	iterator.BaseInit(&m.Base)
-
 	m.cursorName = "j" + strings.Replace(uuid.NewRandom().String(), "-", "", -1)
 	m.sqlQuery = "SELECT id, subj, pred, obj, prov FROM quads"
 	var err error
@@ -58,7 +55,7 @@ func NewIterator(qs *QuadStore, dir graph.Direction, val graph.Value) *Iterator 
 	m.qs = qs
 
 	m.dir = dir
-	if dir != graph.Any {
+	if dir != quad.Any {
 		var ok bool
 		m.val, ok = val.(NodeValue)
 		if !ok {
@@ -91,7 +88,7 @@ func (it *Iterator) beginTx() error {
 	var err error
 	it.tx, err = it.qs.db.Beginx()
 	if err == nil {
-		if it.dir == graph.Any {
+		if it.dir == quad.Any {
 			_, err = it.tx.Exec("DECLARE " + it.cursorName + " CURSOR FOR " + it.sqlQuery + ";")
 		} else {
 			_, err = it.tx.Exec("DECLARE "+it.cursorName+" CURSOR FOR "+it.sqlQuery+";", it.val)
@@ -102,7 +99,6 @@ func (it *Iterator) beginTx() error {
 
 func NewIteratorWhere(qs *QuadStore, where string) *Iterator {
 	var m Iterator
-	iterator.BaseInit(&m.Base)
 
 	m.cursorName = "j" + strings.Replace(uuid.NewRandom().String(), "-", "", -1)
 	m.sqlQuery = "SELECT id, subj, pred, obj, prov FROM quads WHERE "
@@ -111,7 +107,7 @@ func NewIteratorWhere(qs *QuadStore, where string) *Iterator {
 	m.qs = qs
 
 	m.sqlWhere = where
-	m.dir = graph.Any
+	m.dir = quad.Any
 	m.val = NodeValue(0)
 
 	r := qs.db.QueryRowx("SELECT COUNT(*) FROM quads WHERE " + where)
@@ -126,7 +122,7 @@ func NewIteratorWhere(qs *QuadStore, where string) *Iterator {
 }
 
 func NewAllIterator(qs *QuadStore) *Iterator {
-	return NewIterator(qs, graph.Any, nil)
+	return NewIterator(qs, quad.Any, nil)
 }
 
 func (it *Iterator) Reset() {
@@ -144,7 +140,6 @@ func (it *Iterator) Close() {
 
 func (it *Iterator) Clone() graph.Iterator {
 	newM := &Iterator{}
-	iterator.BaseInit(&newM.Base)
 	newM.dir = it.dir
 	newM.val = it.val
 	newM.qs = it.qs
@@ -152,7 +147,7 @@ func (it *Iterator) Clone() graph.Iterator {
 	newM.sqlQuery = it.sqlQuery
 	newM.cursorName = "j" + strings.Replace(uuid.NewRandom().String(), "-", "", -1)
 	newM.tx = nil
-	newM.CopyTagsFrom(it)
+	newM.tags.CopyFrom(it)
 	return newM
 }
 
@@ -165,49 +160,49 @@ func (it *Iterator) Next() (graph.Value, bool) {
 	}
 
 	var nullProv sql.NullInt64
-	var trv QuadValue
+	var qv QuadValue
 	r := it.tx.QueryRowx("FETCH NEXT FROM " + it.cursorName + ";")
-	if err := r.Scan(&trv[0], &trv[1], &trv[2], &trv[3], &nullProv); err != nil {
+	if err := r.Scan(&qv[0], &qv[1], &qv[2], &qv[3], &nullProv); err != nil {
 		if err != sql.ErrNoRows {
 			glog.Errorln("Error Nexting Iterator: ", err)
 		}
 		it.Close()
-		return graph.NextLogOut(it, nil, false)
+		return graph.NextLogOut(it, qv, false)
 	}
 	if nullProv.Valid {
 		nv, _ := nullProv.Value()
-		trv[4] = nv.(int64)
+		qv[4] = nv.(int64)
 	} else {
-		trv[4] = int64(-1)
+		qv[4] = int64(-1)
 	}
-	it.Last = trv
-	return graph.NextLogOut(it, trv, true)
+	it.Last = qv
+	return graph.NextLogOut(it, qv, true)
 }
 
-func (it *Iterator) Check(v graph.Value) bool {
-	graph.CheckLogIn(it, v)
-	if it.dir == graph.Any {
+func (it *Iterator) Contains(v graph.Value) bool {
+	graph.ContainsLogIn(it, v)
+	if it.dir == quad.Any {
 		it.Last = v
-		return graph.CheckLogOut(it, v, true)
+		return graph.ContainsLogOut(it, v, true)
 	}
 	if it.tx == nil {
 		if err := it.beginTx(); err != nil {
-			glog.Fatalln("error beginning in Check() - ", err.Error())
+			glog.Fatalln("error beginning in Contains() - ", err.Error())
 		}
 	}
 
-	trv := v.(QuadValue)
+	qv := v.(QuadValue)
 	hit := 0
-	r := it.tx.QueryRowx("SELECT COUNT(*) FROM ("+it.sqlQuery+") x WHERE x.id=$2;", it.val, trv[0])
+	r := it.tx.QueryRowx("SELECT COUNT(*) FROM ("+it.sqlQuery+") x WHERE x.id=$2;", it.val, qv[0])
 	err := r.Scan(&hit)
 	if err != nil {
 		glog.Fatalln(err.Error())
 	}
 	if hit > 0 {
 		it.Last = v
-		return graph.CheckLogOut(it, v, true)
+		return graph.ContainsLogOut(it, v, true)
 	}
-	return graph.CheckLogOut(it, v, false)
+	return graph.ContainsLogOut(it, v, false)
 }
 
 func (it *Iterator) Size() (int64, bool) {
@@ -215,30 +210,81 @@ func (it *Iterator) Size() (int64, bool) {
 }
 
 func (it *Iterator) Type() graph.Type {
-	if it.sqlWhere == "" && it.dir == graph.Any {
+	if it.sqlWhere == "" && it.dir == quad.Any {
 		return graph.All
 	}
 	return postgresType
 }
-func (it *Iterator) Sorted() bool                     { return false }
-func (it *Iterator) Optimize() (graph.Iterator, bool) { return it, false }
+
+func (it *Iterator) Sorted() bool {
+	return false
+}
+
+func (it *Iterator) Optimize() (graph.Iterator, bool) { 
+	return it, false 
+}
+
+func (it *Iterator) Result() graph.Value {
+	return it.result
+}
+
+func (it *Iterator) ResultTree() *graph.ResultTree {
+	return graph.NewResultTree(it.Result())
+}
+
+func (it *Iterator) NextPath() bool {
+	return false
+}
+
+func (it *Iterator) SubIterators() []graph.Iterator {
+	return nil
+}
+
+func (it *Iterator) TagResults(dst map[string]graph.Value) {
+	for _, tag := range it.tags.Tags() {
+		dst[tag] = it.Result()
+	}
+
+	for tag, value := range it.tags.Fixed() {
+		dst[tag] = value
+	}
+}
+
+func (it *Iterator) Tagger() *graph.Tagger {
+	return &it.tags
+}
+
+func (it *Iterator) UID() uint64 {
+	return it.uid
+}
+
+func (it *Iterator) Describe() graph.Description {
+	size, _ := it.Size()
+	return graph.Description{
+	        UID:       it.UID(),
+	        Name:      it.qs.NameOf(Token(it.checkID)),
+		Type:      it.tags.Tags(),
+		Size:      size,
+		Direction: it.dir,
+	}
+}
 
 func (it *Iterator) DebugString(indent int) string {
 	if it.sqlWhere != "" {
 		return fmt.Sprintf("%s(%s size:%d WHERE %s)", strings.Repeat(" ", indent), it.Type(), it.size,
 			it.sqlWhere)
 	}
-	if it.dir == graph.Any {
+	if it.dir == quad.Any {
 		return fmt.Sprintf("%s(%s size:%d ALL)", strings.Repeat(" ", indent), it.Type(), it.size)
 	}
 	return fmt.Sprintf("%s(%s size:%d %s=%s)", strings.Repeat(" ", indent), it.Type(), it.size,
 		it.dir, it.qs.NameOf(it.val))
 }
 
-func (it *Iterator) GetStats() *graph.IteratorStats {
+func (it *Iterator) Stats() graph.IteratorStats {
 	size, _ := it.Size()
 	return &graph.IteratorStats{
-		CheckCost: 10,
+		ContainsCost: 10,
 		NextCost:  1,
 		Size:      size,
 	}
